@@ -22,7 +22,7 @@ pub struct AppConfig {
     pub selected_monitor: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
     pub presentations: Vec<Presentation>,
     pub active_presentation: Option<String>,
