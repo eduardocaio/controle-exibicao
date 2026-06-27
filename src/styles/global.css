@@ -1,16 +1,5 @@
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  min-height: 100vh;
-  color: #333;
-}
-
-#root {
-  min-height: 100vh;
-}
+/* src/styles/global.css */
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Inter', 'Segoe UI', sans-serif; background:#f7fafc; color:#1a202c; -webkit-font-smoothing:antialiased; }
+#root { min-height:100vh; }
+input:focus { border-color:#667eea !important; }

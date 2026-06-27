@@ -1,9 +1,10 @@
 {
   "identifier": "default",
   "description": "Default capabilities for the app",
-  "windows": ["main"],
+  "windows": ["main", "display"],
   "permissions": [
     "core:default",
-    "shell:allow-open"
+    "shell:allow-open",
+    "dialog:allow-open"
   ]
 }

@@ -12,18 +12,21 @@
   "app": {
     "windows": [
       {
-        "title": "controle-exibicao",
-        "width": 800,
-        "height": 600
+        "title": "Controle de Exibição",
+        "width": 1100,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "label": "main"
       }
-    ],
-    "security": {
-      "csp": null
-    }
+    ]
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/texto-do-ano.jpg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
