@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store/useAppStore';
 import { Plus, Edit2, Trash2, Presentation, Image, Upload, ChevronLeft, Play, Square, Monitor, BookOpen } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import SettingsPage from './SettingsPage';
 
 function AdminPage() {
   const [newName, setNewName] = useState('');
@@ -15,6 +16,7 @@ function AdminPage() {
   const [activeSlideIndex, setActiveSlideIndex] = useState<number | null>(null);
   const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<'sistema' | 'jw'>('sistema');
+  const [showSettings, setShowSettings] = useState(false);
 
   const presentations = useAppStore((s) => s.presentations);
   const setPresentations = useAppStore((s) => s.setPresentations);
@@ -61,7 +63,7 @@ function AdminPage() {
   const handleShow = async (pid: string, idx: number) => {
     await invoke('set_active_presentation', { presentationId: pid });
     await invoke('set_current_slide', { index: idx });
-    await invoke('switch_to_sistema'); // Traz nossa janela ao topo
+    await invoke('switch_to_sistema');
     setActiveSlideIndex(idx);
     setActivePresentationId(pid);
     setActiveApp('sistema');
@@ -84,7 +86,6 @@ function AdminPage() {
     setActiveApp('sistema');
   };
 
-  // Abre a janela de exibição ao iniciar
   useEffect(() => {
     const init = async () => {
       try { await invoke('show_display_window'); } catch (_) {}
@@ -108,6 +109,16 @@ function AdminPage() {
   const btnDanger: React.CSSProperties = { ...btnPrimary, background:'#e53e3e' };
   const btnGhost: React.CSSProperties = { ...btnPrimary, background:'#edf2f7', color:'#4a5568' };
 
+  // ===== SE ESTIVER NAS CONFIGURAÇÕES =====
+  if (showSettings) {
+    return (
+      <div style={{ minHeight:'100vh', padding:'2rem', background:'#f7fafc' }}>
+        <SettingsPage onBack={() => setShowSettings(false)} />
+      </div>
+    );
+  }
+
+  // ===== TELA PRINCIPAL =====
   return (
     <div style={{ minHeight:'100vh', padding:'2rem', display:'flex', justifyContent:'center', background:'#f7fafc' }}>
       <div style={{ width:'100%', maxWidth:'1100px' }}>
@@ -120,10 +131,31 @@ function AdminPage() {
               <h1 style={{ fontSize:'1.6rem', fontWeight:700, margin:0 }}>Controle de Exibição</h1>
               <p style={{ opacity:0.7, margin:0, fontSize:'0.85rem', marginTop:'2px' }}>Gerencie suas apresentações</p>
             </div>
+            <button
+              onClick={() => setShowSettings(true)}
+              style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '12px',
+                background: 'rgba(255,255,255,0.15)',
+                border: 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'white',
+                fontSize: '1.2rem',
+                transition: 'background 0.2s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.25)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
+              title="Configurações"
+            >
+              ⚙️
+            </button>
           </div>
           
           <div style={{ display:'flex', flexDirection:'column', gap:'0.5rem' }}>
-            {/* Monitores */}
             <div style={{ display:'flex', gap:'0.5rem', flexWrap:'wrap' }}>
               {monitors.map((m,i) => (
                 <span key={i} style={{ padding:'0.4rem 0.8rem', borderRadius:'20px', fontSize:'0.8rem', background: i===1?'rgba(72,187,120,0.3)':'rgba(255,255,255,0.1)', display:'flex', alignItems:'center', gap:'0.4rem' }}>
@@ -135,7 +167,6 @@ function AdminPage() {
               )}
             </div>
 
-            {/* Switch Projetor */}
             <div style={{ display:'flex', alignItems:'center', gap:'0.5rem', background:'rgba(255,255,255,0.08)', padding:'0.4rem', borderRadius:'10px' }}>
               <span style={{ fontSize:'0.8rem', opacity:0.8, paddingLeft:'0.5rem' }}>📺 Projetor:</span>
               <button
@@ -186,7 +217,6 @@ function AdminPage() {
         <div style={{ background:'#fff', borderRadius:'20px', padding:'2rem', boxShadow:'0 4px 24px rgba(0,0,0,0.04)' }}>
           {!selectedPresentation ? (
             <>
-              {/* Criar Apresentação */}
               <div style={{ background:'#f7fafc', borderRadius:'16px', padding:'1.5rem', marginBottom:'2rem', border:'2px dashed #cbd5e0' }}>
                 <h2 style={{ fontSize:'1rem', fontWeight:600, color:'#4a5568', marginBottom:'1rem', display:'flex', alignItems:'center', gap:'0.5rem' }}><Plus size={18} /> Nova Apresentação</h2>
                 <div style={{ display:'flex', gap:'0.75rem' }}>
@@ -194,8 +224,6 @@ function AdminPage() {
                   <button onClick={handleCreate} style={btnPrimary}><Plus size={18} /> Criar</button>
                 </div>
               </div>
-
-              {/* Lista de Apresentações */}
               <h2 style={{ fontSize:'1rem', fontWeight:600, color:'#4a5568', marginBottom:'1rem', display:'flex', alignItems:'center', gap:'0.5rem' }}>
                 <Image size={18} /> Minhas Apresentações
                 <span style={{ background:'#667eea', color:'#fff', padding:'0.15rem 0.6rem', borderRadius:'20px', fontSize:'0.8rem' }}>{presentations.length}</span>
@@ -226,16 +254,12 @@ function AdminPage() {
               )}
             </>
           ) : (
-            /* Detalhes da Apresentação */
             <div>
               <button onClick={() => { setSelectedPresentation(null); setActiveSlideIndex(null); }} style={{ ...btnGhost, marginBottom:'1.5rem' }}><ChevronLeft size={18} /> Voltar</button>
-              
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'1.5rem', flexWrap:'wrap', gap:'1rem' }}>
                 <h2 style={{ fontSize:'1.4rem', fontWeight:700, margin:0 }}>{selectedPres?.name}</h2>
                 <button onClick={() => handleUpload(selectedPresentation!)} style={btnPrimary}><Upload size={16} /> Adicionar Imagens</button>
               </div>
-
-              {/* Controles de navegação (quando há imagem ativa) */}
               {activeSlideIndex !== null && activePresentationId === selectedPresentation && (
                 <div style={{ background:'#f0fff4', borderRadius:'14px', padding:'1rem 1.25rem', marginBottom:'1.5rem', border:'1px solid #c6f6d5', display:'flex', alignItems:'center', justifyContent:'center', gap:'1rem', flexWrap:'wrap' }}>
                   <span style={{ color:'#22543d', fontWeight:600, fontSize:'0.9rem' }}>🟢 Slide {activeSlideIndex+1} de {selectedPres?.slides.length}</span>
@@ -244,8 +268,6 @@ function AdminPage() {
                   <button onClick={handleHide} style={btnDanger}><Square size={14} /> Parar Exibição</button>
                 </div>
               )}
-
-              {/* Grid de Slides */}
               {!selectedPres?.slides.length ? (
                 <div onClick={() => handleUpload(selectedPresentation!)} style={{ textAlign:'center', padding:'4rem', background:'#f7fafc', borderRadius:'16px', border:'2px dashed #cbd5e0', cursor:'pointer' }}>
                   <Upload size={48} style={{ opacity:0.3, marginBottom:'1rem', color:'#667eea' }} />
