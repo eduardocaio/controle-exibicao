@@ -31,7 +31,7 @@ function SettingsPage({ onBack }: SettingsPageProps) {
         filters: [{ name: 'Imagens', extensions: ['jpg', 'jpeg', 'png', 'webp'] }]
       });
       if (!selected) return;
-      const filePath = typeof selected === 'string' ? selected : selected.path;
+      const filePath = typeof selected === 'string' ? selected : (selected as any).path;
       await invoke('set_texto_do_ano', { filePath });
       setSuccess(true);
       setHasCustomImage(true);

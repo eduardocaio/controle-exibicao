@@ -14,6 +14,9 @@ use tauri::WebviewWindowBuilder;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use futures_util::{StreamExt, SinkExt};
+use warp::Filter;
+use rust_embed::RustEmbed;
+use mime_guess::from_path;
 
 fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -90,7 +93,6 @@ async fn upload_images_direct(
     fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
     
-    // Prepara os novos slides fora do lock
     let mut new_slides = Vec::new();
     for file_path in &file_paths {
         let original_path = PathBuf::from(file_path);
@@ -104,7 +106,6 @@ async fn upload_images_direct(
         new_slides.push((uuid::Uuid::new_v4().to_string(), new_filename));
     }
     
-    // Agora atualiza o estado
     let mut app_state = state.write().await;
     let start_order = app_state.slides.len();
     for (i, (id, filename)) in new_slides.into_iter().enumerate() {
@@ -235,10 +236,20 @@ async fn reset_texto_do_ano(app_handle: tauri::AppHandle) -> Result<(), String> 
 }
 
 async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app_handle.get_webview_window("display") { w.set_always_on_top(false).ok(); }
+    // ESCONDE/MINIMIZA a janela display primeiro
+    if let Some(w) = app_handle.get_webview_window("display") {
+        w.set_always_on_top(false).ok();
+        w.hide().ok(); // ← Alternativa: esconder completamente
+    }
+    
+    // PowerShell para focar JW Library
     std::process::Command::new("powershell")
-        .args(&["-NoProfile", "-Command", "$wshell = New-Object -ComObject WScript.Shell;", "$wshell.AppActivate('JW Library');"])
+        .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
+            "$wshell = New-Object -ComObject WScript.Shell;",
+            "$wshell.AppActivate('JW Library');"
+        ])
         .spawn().ok();
+    
     app_handle.emit("switch-app", "jw").ok();
     Ok(())
 }
@@ -347,6 +358,113 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
     Ok(())
 }
 
+#[derive(RustEmbed)]
+#[folder = "../dist/"]
+struct StaticAssets;
+
+fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state_filter = warp::any().map(move || app_state.clone());
+        let handle_filter = warp::any().map(move || app_handle.clone());
+        
+        let get_state = warp::path!("api" / "state")
+            .and(warp::get())
+            .and(state_filter.clone())
+            .and_then(|state: SharedState| async move {
+                let app_state = state.read().await;
+                let json = serde_json::json!({
+                    "current_slide_index": app_state.current_slide_index,
+                    "is_blackout": app_state.is_blackout,
+                    "slides": app_state.slides.iter().map(|s| {
+                        serde_json::json!({
+                            "id": s.id,
+                            "filename": s.filename,
+                            "order": s.order
+                        })
+                    }).collect::<Vec<_>>()
+                });
+                Ok::<_, warp::Rejection>(warp::reply::json(&json))
+            });
+        
+        let post_command = warp::path!("api" / "command")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(state_filter.clone())
+            .and(handle_filter.clone())
+            .and_then(|cmd: serde_json::Value, state: SharedState, handle: tauri::AppHandle| async move {
+                let mut app_state = state.write().await;
+                let action = cmd["action"].as_str().unwrap_or("");
+                
+                match action {
+                    "set_slide" => {
+                        if let Some(idx) = cmd["index"].as_u64() {
+                            app_state.current_slide_index = idx as usize;
+                            app_state.is_blackout = false;
+                            drop(app_state);
+                            let _ = switch_to_sistema_internal(&handle).await;
+                        }
+                    },
+                    "blackout" => {
+                        app_state.is_blackout = true;
+                        drop(app_state);
+                        let _ = switch_to_jw_library_internal(&handle).await;
+                    },
+                    "show" => {
+                        app_state.is_blackout = false;
+                        drop(app_state);
+                        let _ = switch_to_sistema_internal(&handle).await;
+                    },
+                    _ => {}
+                }
+                Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"status": "ok"})))
+            });
+        
+        // Servir arquivos estáticos do binário
+        let static_files = warp::any()
+        .and(warp::path::full())
+        .and_then(|path: warp::path::FullPath| async move {
+            let path = path.as_str().trim_start_matches('/');
+            let path = if path.is_empty() { "index.html" } else { path };
+            
+            match StaticAssets::get(path) {
+                Some(content) => {
+                    let mime = from_path(path).first_or_octet_stream();
+                    let bytes: Vec<u8> = content.data.into_owned();
+                    Ok::<_, warp::Rejection>(warp::reply::with_header(
+                        bytes,
+                        "Content-Type",
+                        mime.as_ref(),
+                    ))
+                },
+                None => {
+                    // Fallback para index.html (SPA)
+                    match StaticAssets::get("index.html") {
+                        Some(content) => {
+                            let bytes: Vec<u8> = content.data.into_owned();
+                            Ok(warp::reply::with_header(
+                                bytes,
+                                "Content-Type",
+                                "text/html",
+                            ))
+                        },
+                        None => Err(warp::reject::not_found()),
+                    }
+                }
+            }
+        });                                 
+        
+        let cors = warp::cors()
+            .allow_any_origin()
+            .allow_methods(vec!["GET", "POST"])
+            .allow_headers(vec!["Content-Type"]);
+        
+        let routes = static_files.or(get_state).or(post_command).with(cors);
+        
+        println!("🌐 Servidor HTTP de controle rodando em http://0.0.0.0:20778");
+        warp::serve(routes).run(([0, 0, 0, 0], 20778)).await;
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init())
@@ -354,7 +472,8 @@ pub fn run() {
             let state = load_state_from_disk(&app.handle());
             let shared_state: SharedState = Arc::new(RwLock::new(state));
             app.manage(shared_state.clone());
-            start_ws_server(shared_state, app.handle().clone());
+            start_ws_server(shared_state.clone(), app.handle().clone());
+            start_http_control_server(shared_state.clone(), app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

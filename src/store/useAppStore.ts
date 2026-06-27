@@ -14,23 +14,24 @@ interface Presentation {
 
 interface AppState {
   presentations: Presentation[];
+  slides: Slide[];
+  currentSlideIndex: number;
+  isBlackout: boolean;
   
-  // Ações
   setPresentations: (presentations: Presentation[]) => void;
   addPresentation: (presentation: Presentation) => void;
   removePresentation: (id: string) => void;
   updatePresentationName: (id: string, name: string) => void;
   setPresentationSlides: (id: string, slides: Slide[]) => void;
-  setActivePresentation: (id: string | null) => void;
   setCurrentSlideIndex: (index: number) => void;
   setBlackout: (value: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
   presentations: [],
-  activePresentation: null,
+  slides: [],
   currentSlideIndex: 0,
-  isBlackout: false,
+  isBlackout: true,
   
   setPresentations: (presentations) => set({ presentations }),
   
@@ -57,8 +58,7 @@ export const useAppStore = create<AppState>((set) => ({
         p.id === id ? { ...p, slides } : p
       )
     })),
-
-  setActivePresentation: (id) => set({ activePresentation: id, currentSlideIndex: 0, isBlackout: false }),
+    
   setCurrentSlideIndex: (index) => set({ currentSlideIndex: index }),
   setBlackout: (value) => set({ isBlackout: value }),
 }));

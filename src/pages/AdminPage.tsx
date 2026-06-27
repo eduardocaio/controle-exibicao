@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Upload, Monitor, BookOpen, Trash2, Play, Square, Image, ChevronRight } from 'lucide-react';
+import { Upload, Monitor, BookOpen, Trash2, Play, Square, Image } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
 
@@ -63,7 +63,7 @@ function AdminPage() {
   const handleUpload = async () => {
     const f = await open({ multiple: true, filters: [{ name: 'Imagens', extensions: ['jpg','jpeg','png','webp','gif','bmp'] }] });
     if (!f) return;
-    const paths = (Array.isArray(f)?f:[f]).map(x => typeof x === 'string' ? x : x.path);
+    const paths = (Array.isArray(f) ? f : [f]).map(x => typeof x === 'string' ? x : (x as any).path);
     await invoke('upload_images_direct', { filePaths: paths });
     await loadImages();
   };
