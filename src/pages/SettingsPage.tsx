@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { ChevronLeft, Image, Upload, Check, Camera } from 'lucide-react';
+import { ChevronLeft, Upload, Check, Image, RotateCcw } from 'lucide-react';
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -12,14 +12,8 @@ function SettingsPage({ onBack }: SettingsPageProps) {
   const [currentImage, setCurrentImage] = useState<string>('');
   const [hasCustomImage, setHasCustomImage] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [pin, setPin] = useState('');
-  const [currentPin, setCurrentPin] = useState('');
-  const [pinSuccess, setPinSuccess] = useState(false);
 
-  useEffect(() => {
-    loadCurrentImage();
-    loadPin();
-  }, []);
+  useEffect(() => { loadCurrentImage(); }, []);
 
   const loadCurrentImage = async () => {
     try {
@@ -27,17 +21,7 @@ function SettingsPage({ onBack }: SettingsPageProps) {
       setCurrentImage(base64 as string);
       const path = await invoke('get_texto_do_ano_path');
       setHasCustomImage(!!(path as string));
-    } catch (e) {
-      console.error('Erro ao carregar imagem:', e);
-    }
-  };
-
-  const loadPin = async () => {
-    try {
-      const savedPin = await invoke('get_pin');
-      setCurrentPin(savedPin as string);
-      setPin(savedPin as string);
-    } catch (_) {}
+    } catch (e) { console.error('Erro:', e); }
   };
 
   const handleChangeImage = async () => {
@@ -53,89 +37,98 @@ function SettingsPage({ onBack }: SettingsPageProps) {
       setHasCustomImage(true);
       await loadCurrentImage();
       setTimeout(() => setSuccess(false), 3000);
-    } catch (e) {
-      console.error('Erro ao definir imagem:', e);
-    }
+    } catch (e) { console.error('Erro:', e); }
   };
 
   const handleResetToDefault = async () => {
-    if (!confirm('Voltar para a imagem padrão?')) return;
+    if (!confirm('Restaurar imagem padrão?')) return;
     try {
       await invoke('reset_texto_do_ano');
       setHasCustomImage(false);
       await loadCurrentImage();
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
-    } catch (e) {
-      console.error('Erro ao restaurar:', e);
-      alert('Erro ao restaurar imagem padrão.');
-    }
-  };
-
-  const handleSavePin = async () => {
-    try {
-      await invoke('set_pin', { pin });
-      setCurrentPin(pin);
-      setPinSuccess(true);
-      setTimeout(() => setPinSuccess(false), 3000);
-    } catch (e) {
-      console.error('Erro ao salvar PIN:', e);
-    }
+    } catch (e) { console.error('Erro:', e); }
   };
 
   return (
-    <div style={{ maxWidth: '700px', margin: '0 auto', padding: '2rem' }}>
+    <div style={{ 
+      maxWidth: '640px', 
+      margin: '0 auto', 
+      padding: '2rem',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+    }}>
       
       {/* Cabeçalho */}
       <button onClick={onBack} style={{
-        display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 1.2rem',
-        background: '#edf2f7', color: '#4a5568', border: 'none', borderRadius: '10px',
-        cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem', marginBottom: '2rem'
-      }}>
-        <ChevronLeft size={18} />
+        display: 'flex', alignItems: 'center', gap: '0.5rem', 
+        padding: '0.5rem 1rem',
+        background: 'rgba(255,255,255,0.04)', 
+        color: '#8b949e', 
+        border: '1px solid rgba(255,255,255,0.06)', 
+        borderRadius: '8px',
+        cursor: 'pointer', fontWeight: 600, fontSize: '0.82rem', 
+        marginBottom: '2rem',
+        transition: 'all 0.15s'
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}>
+        <ChevronLeft size={16} />
         Voltar
       </button>
 
-      <h1 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: '0.5rem', color: '#1a1a2e' }}>
-        ⚙️ Configurações
-      </h1>
-      <p style={{ color: '#718096', marginBottom: '2rem', fontSize: '0.95rem' }}>
-        Personalize as configurações do sistema
-      </p>
+      <div style={{ marginBottom: '2rem' }}>
+        <h1 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '0.3rem', color: '#e1e4e8', letterSpacing: '-0.3px' }}>
+          Configurações
+        </h1>
+        <p style={{ color: '#8b949e', margin: 0, fontSize: '0.85rem' }}>
+          Personalize a imagem exibida na tela de exibição
+        </p>
+      </div>
 
       {/* Seção: Texto do Ano */}
       <div style={{
-        background: '#fff', borderRadius: '16px', padding: '1.5rem', marginBottom: '1.5rem',
-        boxShadow: '0 2px 12px rgba(0,0,0,0.04)', border: '1px solid #e2e8f0'
+        background: '#111820', 
+        borderRadius: '14px', 
+        padding: '1.5rem', 
+        border: '1px solid rgba(255,255,255,0.04)'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.25rem' }}>
           <div style={{
-            width: '42px', height: '42px', borderRadius: '12px',
-            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            width: '40px', height: '40px', borderRadius: '10px',
+            background: 'rgba(102,126,234,0.12)',
             display: 'flex', alignItems: 'center', justifyContent: 'center'
           }}>
-            <Camera size={20} color="white" />
+            <Image size={20} color="#667eea" />
           </div>
           <div>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#1a1a2e' }}>Texto do Ano</h2>
-            <p style={{ fontSize: '0.85rem', color: '#718096', margin: '2px 0 0 0' }}>
-              Imagem exibida quando nenhuma apresentação está ativa
+            <h2 style={{ fontSize: '0.95rem', fontWeight: 700, margin: 0, color: '#e1e4e8' }}>
+              Texto do Ano
+            </h2>
+            <p style={{ fontSize: '0.78rem', color: '#8b949e', margin: '2px 0 0 0' }}>
+              Imagem exibida quando nenhuma imagem está ativa no projetor
             </p>
           </div>
         </div>
 
         {/* Preview */}
         <div style={{
-          width: '100%', height: '200px', borderRadius: '12px', overflow: 'hidden',
-          background: '#1a1a2e', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          marginBottom: '1.25rem', border: '2px solid #e2e8f0'
+          width: '100%', height: '200px', borderRadius: '10px', overflow: 'hidden',
+          background: '#080c10', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          marginBottom: '1.25rem', border: '1px solid rgba(255,255,255,0.05)'
         }}>
           {currentImage ? (
-            <img src={currentImage} alt="Texto do Ano atual" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            <img src={currentImage} alt="Texto do Ano" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
           ) : (
-            <div style={{ textAlign: 'center', color: '#718096' }}>
-              <Image size={48} style={{ opacity: 0.3, marginBottom: '0.5rem' }} />
-              <p style={{ fontSize: '0.9rem' }}>Nenhuma imagem definida</p>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ 
+                width: '40px', height: '40px', borderRadius: '10px',
+                background: 'rgba(255,255,255,0.03)', display: 'flex', 
+                alignItems: 'center', justifyContent: 'center', margin: '0 auto 0.5rem' 
+              }}>
+                <Image size={20} color="rgba(255,255,255,0.15)" />
+              </div>
+              <p style={{ fontSize: '0.8rem', color: '#484f58' }}>Nenhuma imagem</p>
             </div>
           )}
         </div>
@@ -144,84 +137,53 @@ function SettingsPage({ onBack }: SettingsPageProps) {
         <div style={{
           display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem',
           padding: '0.5rem 0.75rem', borderRadius: '8px',
-          background: hasCustomImage ? '#f0fff4' : '#fffbeb',
-          fontSize: '0.85rem', color: hasCustomImage ? '#22543d' : '#744210'
+          background: hasCustomImage ? 'rgba(52,211,153,0.06)' : 'rgba(234,179,8,0.06)',
+          border: hasCustomImage ? '1px solid rgba(52,211,153,0.15)' : '1px solid rgba(234,179,8,0.15)',
+          fontSize: '0.78rem', 
+          color: hasCustomImage ? '#34d399' : '#eab308'
         }}>
-          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: hasCustomImage ? '#48bb78' : '#ecc94b', display: 'inline-block' }} />
+          <span style={{ 
+            width: '6px', height: '6px', borderRadius: '50%', 
+            background: hasCustomImage ? '#34d399' : '#eab308',
+            display: 'inline-block' 
+          }} />
           {hasCustomImage ? 'Imagem personalizada definida' : 'Usando imagem padrão do sistema'}
         </div>
 
         {/* Botões */}
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
           <button onClick={handleChangeImage} style={{
-            padding: '0.7rem 1.3rem', background: success ? '#48bb78' : '#667eea', color: 'white',
-            border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 600,
-            fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', transition: 'all 0.2s'
-          }}>
-            {success ? <Check size={18} /> : <Upload size={18} />}
-            {success ? 'Imagem atualizada!' : 'Escolher imagem...'}
+            padding: '0.6rem 1.1rem', 
+            background: success ? 'rgba(52,211,153,0.12)' : 'rgba(102,126,234,0.12)', 
+            color: success ? '#34d399' : '#667eea',
+            border: success ? '1px solid rgba(52,211,153,0.25)' : '1px solid rgba(102,126,234,0.25)',
+            borderRadius: '8px', cursor: 'pointer', fontWeight: 600,
+            fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '0.4rem', 
+            transition: 'all 0.15s'
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = success ? 'rgba(52,211,153,0.18)' : 'rgba(102,126,234,0.18)'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = success ? 'rgba(52,211,153,0.12)' : 'rgba(102,126,234,0.12)'; }}>
+            {success ? <Check size={16} /> : <Upload size={16} />}
+            {success ? 'Atualizada' : 'Escolher imagem'}
           </button>
           {hasCustomImage && (
             <button onClick={handleResetToDefault} style={{
-              padding: '0.7rem 1.3rem', background: '#edf2f7', color: '#4a5568',
-              border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 600,
-              fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem'
-            }}>
+              padding: '0.6rem 1.1rem', 
+              background: 'rgba(255,255,255,0.03)', 
+              color: '#8b949e',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '8px', cursor: 'pointer', fontWeight: 600,
+              fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
+              transition: 'all 0.15s'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = '#e1e4e8'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.color = '#8b949e'; }}>
+              <RotateCcw size={16} />
               Restaurar padrão
             </button>
           )}
         </div>
       </div>
-
-      {/* Seção: PIN de Segurança */}
-      <div style={{
-        background: '#fff', borderRadius: '16px', padding: '1.5rem',
-        boxShadow: '0 2px 12px rgba(0,0,0,0.04)', border: '1px solid #e2e8f0'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.25rem' }}>
-          <div style={{
-            width: '42px', height: '42px', borderRadius: '12px',
-            background: 'linear-gradient(135deg, #e53e3e 0%, #c53030 100%)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center'
-          }}>
-            🔒
-          </div>
-          <div>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#1a1a2e' }}>PIN de Segurança</h2>
-            <p style={{ fontSize: '0.85rem', color: '#718096', margin: '2px 0 0 0' }}>
-              Código para conectar o tablet ao sistema
-            </p>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <input
-            type="password" value={pin} onChange={(e) => setPin(e.target.value)}
-            placeholder="Novo PIN (deixe vazio para remover)" maxLength={6}
-            style={{ padding: '0.7rem 1rem', borderRadius: '10px', border: '2px solid #e2e8f0', fontSize: '1rem', width: '200px', outline: 'none' }}
-            onKeyPress={(e) => e.key === 'Enter' && handleSavePin()}
-          />
-          <button onClick={handleSavePin} style={{
-            padding: '0.7rem 1.3rem', background: pinSuccess ? '#48bb78' : '#667eea', color: 'white',
-            border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 600,
-            fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem', transition: 'all 0.2s'
-          }}>
-            {pinSuccess ? <Check size={18} /> : '💾'}
-            {pinSuccess ? 'Salvo!' : 'Salvar PIN'}
-          </button>
-        </div>
-
-        {currentPin ? (
-          <p style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: '#718096' }}>
-            PIN atual: {currentPin.replace(/./g, '•')}
-          </p>
-        ) : (
-          <p style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: '#ecc94b' }}>
-            ⚠️ Nenhum PIN definido. O tablet pode conectar sem senha.
-          </p>
-        )}
-      </div>
-
     </div>
   );
 }

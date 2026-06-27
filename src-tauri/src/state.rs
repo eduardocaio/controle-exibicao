@@ -1,3 +1,5 @@
+// src-tauri/src/state.rs
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -10,13 +12,6 @@ pub struct Slide {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Presentation {
-    pub id: String,
-    pub name: String,
-    pub slides: Vec<Slide>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub pin: String,
     pub selected_monitor: String,
@@ -24,8 +19,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
-    pub presentations: Vec<Presentation>,
-    pub active_presentation: Option<String>,
+    pub slides: Vec<Slide>,
     pub current_slide_index: usize,
     pub is_blackout: bool,
     pub config: AppConfig,
@@ -34,13 +28,12 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            presentations: Vec::new(),
-            active_presentation: None,
+            slides: Vec::new(),
             current_slide_index: 0,
-            is_blackout: false,
+            is_blackout: true,
             config: AppConfig {
-                pin: "1234".to_string(),
-                selected_monitor: "".to_string(),
+                pin: String::new(),
+                selected_monitor: String::new(),
             },
         }
     }
