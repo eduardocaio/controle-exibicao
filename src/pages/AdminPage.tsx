@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { 
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
-  FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban
+  FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
@@ -34,6 +34,7 @@ function AdminPage() {
   const [newPresentationName, setNewPresentationName] = useState('');
   const [expandedPresentation, setExpandedPresentation] = useState<string | null>(null);
   const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
@@ -113,16 +114,38 @@ function AdminPage() {
     }
   };
 
+  const handleImportJwPlaylist = async () => {
+    const f = await open({ 
+      multiple: false, 
+      filters: [{ name: 'Arquivos JW', extensions: ['jwlplaylist', 'zip'] }] 
+    });
+    if (!f) return;
+    
+    const filePath = typeof f === 'string' ? f : (f as any).path;
+    setIsImporting(true);
+    
+    try {
+      const presentationId = await invoke('extract_jw_playlist', { filePath });
+      await loadPresentations();
+      // Expandir a apresentação importada
+      setExpandedPresentation(presentationId);
+      alert('Arquivo JW importado com sucesso! As imagens foram extraídas na ordem da playlist.');
+    } catch (e) {
+      console.error('Erro ao importar JW:', e);
+      alert('Erro ao importar arquivo JW. Verifique se o arquivo é válido e tente novamente.');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const handleDeletePresentation = async (id: string) => {
     if (!confirm('Excluir esta apresentação e todas as suas imagens?')) return;
     
-    // Verificar se é a apresentação ativa antes de deletar
     const isActive = activePresentationId === id;
     
     await invoke('delete_presentation', { presentationId: id });
     await loadPresentations();
     
-    // Se deletou a apresentação ativa, alternar para JW Library
     if (isActive) {
       await handleSwitchToJW();
     }
@@ -153,12 +176,9 @@ function AdminPage() {
       await invoke('set_active_presentation', { presentationId });
       await loadPresentations();
       
-      // Se desativou a apresentação (passou null), alternar para JW Library
       if (presentationId === null) {
         await handleSwitchToJW();
       }
-      // REMOVIDO o else que alternava para sistema quando ativava
-      // Agora mantém no JW Library mesmo quando ativa uma apresentação
     } catch (e) {
       console.error('Erro ao definir apresentação ativa:', e);
     }
@@ -432,12 +452,12 @@ function AdminPage() {
             </div>
         </div>
 
-        {/* Criar Nova Apresentação */}
+        {/* Criar Nova Apresentação + Importar JW */}
         <div style={{ 
           background:'#111820', borderRadius:'16px', padding:'1.25rem', 
           marginBottom:'1rem', border:'1px solid rgba(255,255,255,0.04)' 
         }}>
-          <div style={{ display:'flex', gap:'0.5rem', alignItems:'center' }}>
+          <div style={{ display:'flex', gap:'0.5rem', alignItems:'center', flexWrap:'wrap' }}>
             <div style={{
               width:'36px', height:'36px', borderRadius:'8px',
               background:'rgba(52,211,153,0.1)', display:'flex', 
@@ -453,6 +473,7 @@ function AdminPage() {
               placeholder="Nome da nova apresentação..."
               style={{
                 flex: 1,
+                minWidth: '200px',
                 padding:'0.6rem 0.8rem',
                 background:'rgba(255,255,255,0.03)',
                 border:'1px solid rgba(255,255,255,0.06)',
@@ -468,10 +489,44 @@ function AdminPage() {
               color:'#000', border:'none', borderRadius:'8px',
               cursor: newPresentationName.trim() ? 'pointer' : 'not-allowed',
               fontWeight:700, fontSize:'0.85rem',
-              display:'flex', alignItems:'center', gap:'0.4rem'
+              display:'flex', alignItems:'center', gap:'0.4rem',
+              transition:'all 0.15s'
             }}>
               <Plus size={16} /> Criar
             </button>
+            <button 
+              onClick={handleImportJwPlaylist} 
+              disabled={isImporting}
+              style={{
+                padding:'0.6rem 1.2rem',
+                background:'rgba(147,51,234,0.1)', 
+                color:'#a855f7',
+                border:'1px solid rgba(147,51,234,0.2)', 
+                borderRadius:'8px',
+                cursor: isImporting ? 'wait' : 'pointer', 
+                fontWeight:700, 
+                fontSize:'0.85rem',
+                display:'flex', 
+                alignItems:'center', 
+                gap:'0.4rem',
+                transition:'all 0.15s',
+                opacity: isImporting ? 0.7 : 1
+              }}
+              onMouseEnter={e => {
+                if (!isImporting) {
+                  e.currentTarget.style.background = 'rgba(147,51,234,0.2)';
+                }
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'rgba(147,51,234,0.1)';
+              }}
+            >
+              <FileArchive size={16} />
+              {isImporting ? 'Importando...' : 'Importar JW'}
+            </button>
+          </div>
+          <div style={{ marginTop:'0.5rem', fontSize:'0.7rem', color:'#484f58' }}>
+            O arquivo JW (.jwlplaylist) é extraído automaticamente com as imagens na ordem correta da playlist
           </div>
         </div>
 
@@ -512,7 +567,7 @@ function AdminPage() {
               Nenhuma apresentação criada
             </p>
             <p style={{ color:'#484f58', fontSize:'0.78rem', marginTop:'4px' }}>
-              Crie uma apresentação para começar
+              Crie uma apresentação ou importe um arquivo JW para começar
             </p>
           </div>
         ) : (

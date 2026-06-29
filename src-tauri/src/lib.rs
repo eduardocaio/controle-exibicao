@@ -2,6 +2,7 @@ mod state;
 
 use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage, Presentation};
 use std::fs;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,8 @@ use rust_embed::RustEmbed;
 use mime_guess::from_path;
 use image::ImageFormat;
 use image::GenericImageView;
+use rusqlite::Connection;
+use std::collections::HashMap;
 
 // Estrutura para gerenciar conexões WebSocket
 struct WsClients {
@@ -113,6 +116,237 @@ fn get_active_slides(state: &AppState) -> Vec<Slide> {
     Vec::new()
 }
 
+// Constantes para extensões de mídia
+const IMG_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
+const VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "webm", "avi", "mkv"];
+
+fn is_media_ext(ext: &str) -> bool {
+    let ext = ext.trim_start_matches('.').to_lowercase();
+    IMG_EXTS.contains(&ext.as_str()) || VIDEO_EXTS.contains(&ext.as_str())
+}
+
+fn is_image_ext(ext: &str) -> bool {
+    let ext = ext.trim_start_matches('.').to_lowercase();
+    IMG_EXTS.contains(&ext.as_str())
+}
+
+fn is_thumbnail_name(path: &str) -> bool {
+    let path_lower = path.to_lowercase();
+    let name = std::path::Path::new(&path_lower)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    
+    path_lower.contains("thumbnail") 
+        || path_lower.contains("thumb") 
+        || path_lower.contains("poster") 
+        || path_lower.contains("cover") 
+        || path_lower.contains("capa") 
+        || name.starts_with("default_thumbnail")
+}
+
+fn extract_zip_to_temp(zip_data: &[u8], app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_dir = get_data_dir(app_handle);
+    let temp_dir = app_dir.join("jw_temp").join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    
+    let cursor = Cursor::new(zip_data);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Erro ao abrir ZIP: {}", e))?;
+    
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("Erro ao ler arquivo do ZIP: {}", e))?;
+        let out_path = temp_dir.join(file.name());
+        
+        if file.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut out_file = fs::File::create(&out_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut out_file).map_err(|e| e.to_string())?;
+        }
+    }
+    
+    Ok(temp_dir)
+}
+
+fn find_user_db(temp_dir: &PathBuf) -> Option<PathBuf> {
+    let candidates = vec![
+        temp_dir.join("userData.db"),
+        temp_dir.join("userdata.db"),
+    ];
+    
+    for c in candidates {
+        if c.exists() {
+            return Some(c);
+        }
+    }
+    
+    find_user_db_recursive(temp_dir)
+}
+
+fn find_user_db_recursive(dir: &PathBuf) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_lowercase() == "userdata.db") {
+                return Some(path);
+            } else if path.is_dir() {
+                if let Some(found) = find_user_db_recursive(&path) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug)]
+struct PlaylistItem {
+    playlist_item_id: i64,
+    label: String,
+    thumbnail_file_path: String,
+    original_filename: String,
+    file_path: String,
+    mime_type: String,
+}
+
+fn extract_media_from_db(db_path: &PathBuf) -> Result<Vec<PlaylistItem>, String> {
+    let conn = Connection::open(db_path).map_err(|e| format!("Erro ao abrir banco de dados: {}", e))?;
+    
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .map_err(|e| format!("Erro ao consultar tabelas: {}", e))?;
+    let tables: Vec<String> = stmt.query_map([], |row| row.get(0))
+        .map_err(|e| format!("Erro ao mapear tabelas: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    let required = vec!["PlaylistItem", "PlaylistItemIndependentMediaMap", "IndependentMedia"];
+    let has_all = required.iter().all(|r| tables.iter().any(|t| t == *r));
+    
+    if !has_all {
+        return Ok(Vec::new());
+    }
+    
+    let has_thumbnail = {
+        let mut stmt = conn.prepare("PRAGMA table_info(PlaylistItem)")
+            .map_err(|_| false).unwrap_or_else(|_| panic!());
+        let cols: Vec<String> = stmt.query_map([], |row| row.get(1))
+            .unwrap_or_else(|_| panic!())
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.contains(&"ThumbnailFilePath".to_string())
+    };
+    
+    let query = if has_thumbnail {
+        "SELECT pi.PlaylistItemId, pi.Label, pi.ThumbnailFilePath, im.OriginalFilename, im.FilePath, im.MimeType 
+         FROM PlaylistItem pi 
+         JOIN PlaylistItemIndependentMediaMap pim ON pim.PlaylistItemId = pi.PlaylistItemId 
+         JOIN IndependentMedia im ON im.IndependentMediaId = pim.IndependentMediaId 
+         ORDER BY pi.PlaylistItemId ASC, im.IndependentMediaId ASC"
+    } else {
+        "SELECT pi.PlaylistItemId, pi.Label, '' as ThumbnailFilePath, im.OriginalFilename, im.FilePath, im.MimeType 
+         FROM PlaylistItem pi 
+         JOIN PlaylistItemIndependentMediaMap pim ON pim.PlaylistItemId = pi.PlaylistItemId 
+         JOIN IndependentMedia im ON im.IndependentMediaId = pim.IndependentMediaId 
+         ORDER BY pi.PlaylistItemId ASC, im.IndependentMediaId ASC"
+    };
+    
+    let mut stmt = conn.prepare(query)
+        .map_err(|e| format!("Erro ao preparar consulta: {}", e))?;
+    
+    let items = stmt.query_map([], |row| {
+        Ok(PlaylistItem {
+            playlist_item_id: row.get(0)?,
+            label: row.get::<_, String>(1).unwrap_or_default(),
+            thumbnail_file_path: row.get::<_, String>(2).unwrap_or_default(),
+            original_filename: row.get::<_, String>(3).unwrap_or_default(),
+            file_path: row.get::<_, String>(4).unwrap_or_default(),
+            mime_type: row.get::<_, String>(5).unwrap_or_default(),
+        })
+    }).map_err(|e| format!("Erro ao executar consulta: {}", e))?;
+    
+    let mut result = Vec::new();
+    for item in items {
+        if let Ok(item) = item {
+            result.push(item);
+        }
+    }
+    
+    Ok(result)
+}
+
+fn find_file_in_dir(dir: &PathBuf, rel_path: &str) -> Option<PathBuf> {
+    let rel_path = rel_path.replace('\\', "/").trim_start_matches('/').to_string();
+    let direct = dir.join(&rel_path);
+    
+    if direct.exists() && direct.is_file() {
+        return Some(direct);
+    }
+    
+    let file_name = std::path::Path::new(&rel_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    
+    find_file_recursive(dir, &file_name)
+}
+
+fn find_file_recursive(dir: &PathBuf, file_name: &str) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
+                return Some(path);
+            } else if path.is_dir() {
+                if let Some(found) = find_file_recursive(&path, file_name) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_image_resolution(path: &PathBuf) -> (u32, u32, u64) {
+    if let Ok(img) = image::open(path) {
+        let (w, h) = img.dimensions();
+        (w, h, (w as u64) * (h as u64))
+    } else {
+        (0, 0, 0)
+    }
+}
+
+fn is_thumbnail_by_resolution(path: &PathBuf, min_side: u32, min_pixels: u64) -> bool {
+    let (w, h, px) = get_image_resolution(path);
+    if w == 0 || h == 0 {
+        return false;
+    }
+    w.min(h) < min_side || px < min_pixels
+}
+
+fn copy_media_fallback(dir: &PathBuf, result: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if is_media_ext(ext) && !is_thumbnail_name(&path.to_string_lossy()) {
+                        if is_image_ext(ext) && is_thumbnail_by_resolution(&path, 300, 120000) {
+                            continue;
+                        }
+                        result.push(path);
+                    }
+                }
+            } else if path.is_dir() {
+                copy_media_fallback(&path, result);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn get_app_data_dir(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(app_handle.path().app_data_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string())
@@ -154,7 +388,6 @@ async fn delete_presentation(
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut app_state = state.write().await;
     
-    // Remover imagens da apresentação
     if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
         for slide in &pres.slides {
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
@@ -162,7 +395,6 @@ async fn delete_presentation(
         }
     }
     
-    // Se era a apresentação ativa, desativar
     if app_state.active_presentation_id.as_ref() == Some(&presentation_id) {
         app_state.active_presentation_id = None;
         app_state.current_slide_index = 0;
@@ -182,7 +414,6 @@ async fn set_active_presentation(
 ) -> Result<(), String> {
     let mut app_state = state.write().await;
     
-    // Desativar todas as apresentações primeiro
     for pres in &mut app_state.presentations {
         pres.active = false;
     }
@@ -203,7 +434,6 @@ async fn set_active_presentation(
     
     save_state_to_disk(&app_state, &app_handle);
     
-    // Notificar tablets via WebSocket
     let active_slides = get_active_slides(&app_state);
     let msg = serde_json::json!({
         "type": "state",
@@ -277,7 +507,6 @@ async fn upload_images_to_presentation(
             pres.slides.push(Slide { id, filename, order: start_order + i });
         }
         
-        // Se esta apresentação é a ativa, notificar tablets
         if pres.active {
             let active_slides = get_active_slides(&app_state);
             let msg = serde_json::json!({
@@ -308,9 +537,7 @@ async fn delete_slide_from_presentation(
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut app_state = state.write().await;
     
-    // Primeiro, remover os arquivos e o slide
     if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
-        // Remover arquivo
         if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
             let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
@@ -322,7 +549,6 @@ async fn delete_slide_from_presentation(
         }
     }
     
-    // Depois, verificar se precisa ajustar o índice (fora do borrow mutável de pres)
     let needs_update = if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
         pres.active && app_state.current_slide_index >= pres.slides.len()
     } else {
@@ -337,7 +563,6 @@ async fn delete_slide_from_presentation(
         };
     }
     
-    // Verificar se a apresentação é ativa para notificar tablets
     let is_active = app_state.presentations.iter()
         .find(|p| p.id == presentation_id)
         .map(|p| p.active)
@@ -357,6 +582,173 @@ async fn delete_slide_from_presentation(
     
     save_state_to_disk(&app_state, &app_handle);
     Ok(())
+}
+
+// COMANDO DE IMPORTAÇÃO JW PLAYLIST
+
+#[tauri::command]
+async fn extract_jw_playlist(
+    file_path: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    
+    let zip_data = fs::read(&file_path).map_err(|e| format!("Erro ao ler arquivo: {}", e))?;
+    
+    let temp_dir = extract_zip_to_temp(&zip_data, &app_handle)?;
+    
+    let db_path = find_user_db(&temp_dir);
+    
+    let images_dir = app_dir.join("images");
+    let thumbs_dir = app_dir.join("thumbnails");
+    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    
+    let min_side = 300u32;
+    let min_pixels = 120000u64;
+    
+    let mut app_state = state.write().await;
+    
+    let presentation_name = PathBuf::from(&file_path)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Apresentação JW")
+        .to_string();
+    
+    let presentation_id = uuid::Uuid::new_v4().to_string();
+    
+    let mut new_slides = Vec::new();
+    
+    if let Some(db_path) = db_path {
+        if let Ok(items) = extract_media_from_db(&db_path) {
+            let mut grouped: HashMap<i64, Vec<&PlaylistItem>> = HashMap::new();
+            
+            for item in &items {
+                let file_path_normalized = item.file_path.replace('\\', "/").trim_start_matches('/').to_string();
+                let thumb_normalized = item.thumbnail_file_path.replace('\\', "/").trim_start_matches('/').to_string();
+                
+                if !thumb_normalized.is_empty() && file_path_normalized == thumb_normalized {
+                    continue;
+                }
+                
+                if is_thumbnail_name(&item.file_path) || is_thumbnail_name(&item.original_filename) {
+                    continue;
+                }
+                
+                if let Some(src_path) = find_file_in_dir(&temp_dir, &item.file_path) {
+                    let ext = src_path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("jpg");
+                    
+                    if !is_media_ext(ext) {
+                        continue;
+                    }
+                    
+                    if is_image_ext(ext) && is_thumbnail_by_resolution(&src_path, min_side, min_pixels) {
+                        continue;
+                    }
+                    
+                    grouped.entry(item.playlist_item_id)
+                        .or_insert_with(Vec::new)
+                        .push(item);
+                }
+            }
+            
+            let mut ordered_ids: Vec<i64> = grouped.keys().cloned().collect();
+            ordered_ids.sort();
+            
+            for id in ordered_ids {
+                if let Some(items) = grouped.get(&id) {
+                    if let Some(item) = items.first() {
+                        if let Some(src_path) = find_file_in_dir(&temp_dir, &item.file_path) {
+                            let ext = src_path.extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("jpg");
+                            
+                            let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+                            let dest_path = images_dir.join(&new_filename);
+                            let thumb_path = thumbs_dir.join(&new_filename);
+                            
+                            if let Ok(img) = image::open(&src_path) {
+                                let (width, height) = img.dimensions();
+                                let optimized = if width > 1920 || height > 1080 {
+                                    let aspect = width as f32 / height as f32;
+                                    let new_h = 1080u32;
+                                    let new_w = (new_h as f32 * aspect) as u32;
+                                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                                } else {
+                                    img
+                                };
+                                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
+                                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+                            } else {
+                                fs::copy(&src_path, &dest_path).ok();
+                                fs::copy(&src_path, &thumb_path).ok();
+                            }
+                            
+                            new_slides.push(Slide {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                filename: new_filename,
+                                order: new_slides.len(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut all_media = Vec::new();
+        copy_media_fallback(&temp_dir, &mut all_media);
+        
+        for src_path in &all_media {
+            let ext = src_path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("jpg");
+            
+            let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+            let dest_path = images_dir.join(&new_filename);
+            let thumb_path = thumbs_dir.join(&new_filename);
+            
+            if let Ok(img) = image::open(src_path) {
+                let (width, height) = img.dimensions();
+                let optimized = if width > 1920 || height > 1080 {
+                    let aspect = width as f32 / height as f32;
+                    let new_h = 1080u32;
+                    let new_w = (new_h as f32 * aspect) as u32;
+                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                } else {
+                    img
+                };
+                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
+                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+            } else {
+                fs::copy(src_path, &dest_path).ok();
+                fs::copy(src_path, &thumb_path).ok();
+            }
+            
+            new_slides.push(Slide {
+                id: uuid::Uuid::new_v4().to_string(),
+                filename: new_filename,
+                order: new_slides.len(),
+            });
+        }
+    }
+    
+    app_state.presentations.push(Presentation {
+        id: presentation_id.clone(),
+        name: presentation_name,
+        slides: new_slides,
+        active: false,
+    });
+    
+    let _ = fs::remove_dir_all(&temp_dir);
+    
+    save_state_to_disk(&app_state, &app_handle);
+    
+    Ok(presentation_id)
 }
 
 // COMANDOS DE IMAGEM (mantidos para compatibilidade)
@@ -407,7 +799,6 @@ async fn upload_images_direct(
     
     let mut app_state = state.write().await;
     
-    // Criar uma apresentação padrão se não existir
     if app_state.presentations.is_empty() {
         app_state.presentations.push(Presentation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -417,7 +808,6 @@ async fn upload_images_direct(
         });
     }
     
-    // Adicionar slides à primeira apresentação
     if let Some(pres) = app_state.presentations.first_mut() {
         let start_order = pres.slides.len();
         for (i, (id, filename)) in new_slides.into_iter().enumerate() {
@@ -441,7 +831,6 @@ async fn delete_slide(slide_id: String, state: tauri::State<'_, SharedState>, ap
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut app_state = state.write().await;
     
-    // Procurar em todas as apresentações
     for pres in &mut app_state.presentations {
         if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
@@ -883,7 +1272,6 @@ async fn handle_ws_connection(
                 }
             });
 
-            // Enviar estado inicial com slides ativos
             {
                 let state = app_state.read().await;
                 let active_slides = get_active_slides(&state);
@@ -917,7 +1305,6 @@ async fn handle_ws_connection(
                 }).to_string();
                 let _ = s.send(Message::Text(timer_msg)).await;
                 
-                // Enviar mensagem do operador se existir
                 if let Some(ref msg) = state.operator_message {
                     if !msg.acknowledged {
                         let op_msg = serde_json::json!({
@@ -1318,7 +1705,6 @@ pub fn run() {
         .setup(|app| {
             let state = load_state_from_disk(&app.handle());
             
-            // Garantir que nenhuma apresentação esteja ativa ao iniciar
             let mut state = state;
             for pres in &mut state.presentations {
                 pres.active = false;
@@ -1348,7 +1734,8 @@ pub fn run() {
             request_indicator, acknowledge_indicator_request, get_indicator_request,
             send_operator_message, acknowledge_operator_message, get_operator_message,
             create_presentation, delete_presentation, set_active_presentation,
-            upload_images_to_presentation, delete_slide_from_presentation, get_presentations
+            upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
+            extract_jw_playlist
         ])
         .run(tauri::generate_context!())
         .expect("erro");
