@@ -8,6 +8,14 @@ pub struct Slide {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Presentation {
+    pub id: String,
+    pub name: String,
+    pub slides: Vec<Slide>,
+    pub active: bool, // Se está ativa para o tablet
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerState {
     pub running: bool,
     pub start_time: u64,
@@ -37,7 +45,8 @@ pub struct OperatorMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
-    pub slides: Vec<Slide>,
+    pub presentations: Vec<Presentation>,
+    pub active_presentation_id: Option<String>, // Apresentação atualmente ativa
     pub current_slide_index: usize,
     pub is_blackout: bool,
     pub timer: TimerState,
@@ -49,7 +58,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            slides: Vec::new(),
+            presentations: Vec::new(),
+            active_presentation_id: None,
             current_slide_index: 0,
             is_blackout: true,
             timer: TimerState {

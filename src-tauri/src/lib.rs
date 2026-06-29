@@ -1,6 +1,6 @@
 mod state;
 
-use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage};
+use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage, Presentation};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -104,6 +104,15 @@ fn build_slides_json(slides: &Vec<Slide>, _app_handle: &tauri::AppHandle) -> Vec
     }).collect()
 }
 
+fn get_active_slides(state: &AppState) -> Vec<Slide> {
+    if let Some(active_id) = &state.active_presentation_id {
+        if let Some(pres) = state.presentations.iter().find(|p| &p.id == active_id) {
+            return pres.slides.clone();
+        }
+    }
+    Vec::new()
+}
+
 #[tauri::command]
 async fn get_app_data_dir(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(app_handle.path().app_data_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string())
@@ -113,6 +122,244 @@ async fn get_app_data_dir(app_handle: tauri::AppHandle) -> Result<String, String
 async fn get_app_state(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     serde_json::to_string(&*state.read().await).map_err(|e| e.to_string())
 }
+
+// COMANDOS DE APRESENTAÇÃO
+
+#[tauri::command]
+async fn create_presentation(
+    name: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    let mut app_state = state.write().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    
+    app_state.presentations.push(Presentation {
+        id: id.clone(),
+        name,
+        slides: Vec::new(),
+        active: false,
+    });
+    
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(id)
+}
+
+#[tauri::command]
+async fn delete_presentation(
+    presentation_id: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut app_state = state.write().await;
+    
+    // Remover imagens da apresentação
+    if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
+        for slide in &pres.slides {
+            let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
+            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+        }
+    }
+    
+    // Se era a apresentação ativa, desativar
+    if app_state.active_presentation_id.as_ref() == Some(&presentation_id) {
+        app_state.active_presentation_id = None;
+        app_state.current_slide_index = 0;
+    }
+    
+    app_state.presentations.retain(|p| p.id != presentation_id);
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_active_presentation(
+    presentation_id: Option<String>,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    
+    // Desativar todas as apresentações primeiro
+    for pres in &mut app_state.presentations {
+        pres.active = false;
+    }
+    
+    if let Some(ref id) = presentation_id {
+        if let Some(pres) = app_state.presentations.iter_mut().find(|p| &p.id == id) {
+            pres.active = true;
+            app_state.active_presentation_id = Some(id.clone());
+        } else {
+            return Err("Apresentação não encontrada".to_string());
+        }
+    } else {
+        app_state.active_presentation_id = None;
+    }
+    
+    app_state.current_slide_index = 0;
+    app_state.is_blackout = true;
+    
+    save_state_to_disk(&app_state, &app_handle);
+    
+    // Notificar tablets via WebSocket
+    let active_slides = get_active_slides(&app_state);
+    let msg = serde_json::json!({
+        "type": "state",
+        "slides": build_slides_json(&active_slides, &app_handle),
+        "current_index": app_state.current_slide_index,
+        "is_blackout": app_state.is_blackout,
+        "active_presentation_id": app_state.active_presentation_id,
+    }).to_string();
+    ws_clients.broadcast(msg);
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_presentations(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.presentations).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn upload_images_to_presentation(
+    presentation_id: String,
+    file_paths: Vec<String>,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let images_dir = app_dir.join("images");
+    let thumbs_dir = app_dir.join("thumbnails");
+    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    
+    let mut new_slides = Vec::new();
+    for file_path in &file_paths {
+        let original_path = PathBuf::from(file_path);
+        let extension = original_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), extension);
+        let dest_path = images_dir.join(&new_filename);
+        let thumb_path = thumbs_dir.join(&new_filename);
+        
+        if let Ok(img) = image::open(&original_path) {
+            let (width, height) = img.dimensions();
+            
+            let optimized_img = if width > 1920 || height > 1080 {
+                let aspect_ratio = width as f32 / height as f32;
+                let new_height = 1080u32;
+                let new_width = (new_height as f32 * aspect_ratio) as u32;
+                img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            
+            let _ = optimized_img.save_with_format(&dest_path, ImageFormat::Jpeg);
+            
+            let thumb = optimized_img.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+            let _ = thumb.save_with_format(&thumb_path, ImageFormat::Jpeg);
+        } else {
+            let _ = fs::copy(&original_path, &dest_path);
+            let _ = fs::copy(&original_path, &thumb_path);
+        }
+        
+        new_slides.push((uuid::Uuid::new_v4().to_string(), new_filename));
+    }
+    
+    let mut app_state = state.write().await;
+    
+    if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
+        let start_order = pres.slides.len();
+        for (i, (id, filename)) in new_slides.into_iter().enumerate() {
+            pres.slides.push(Slide { id, filename, order: start_order + i });
+        }
+        
+        // Se esta apresentação é a ativa, notificar tablets
+        if pres.active {
+            let active_slides = get_active_slides(&app_state);
+            let msg = serde_json::json!({
+                "type": "state",
+                "slides": build_slides_json(&active_slides, &app_handle),
+                "current_index": app_state.current_slide_index,
+                "is_blackout": app_state.is_blackout,
+                "active_presentation_id": app_state.active_presentation_id,
+            }).to_string();
+            ws_clients.broadcast(msg);
+        }
+    } else {
+        return Err("Apresentação não encontrada".to_string());
+    }
+    
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_slide_from_presentation(
+    presentation_id: String,
+    slide_id: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut app_state = state.write().await;
+    
+    // Primeiro, remover os arquivos e o slide
+    if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
+        // Remover arquivo
+        if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
+            let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
+            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+        }
+        
+        pres.slides.retain(|s| s.id != slide_id);
+        for (i, slide) in pres.slides.iter_mut().enumerate() { 
+            slide.order = i; 
+        }
+    }
+    
+    // Depois, verificar se precisa ajustar o índice (fora do borrow mutável de pres)
+    let needs_update = if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
+        pres.active && app_state.current_slide_index >= pres.slides.len()
+    } else {
+        false
+    };
+    
+    if needs_update {
+        app_state.current_slide_index = if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
+            if pres.slides.is_empty() { 0 } else { pres.slides.len() - 1 }
+        } else {
+            0
+        };
+    }
+    
+    // Verificar se a apresentação é ativa para notificar tablets
+    let is_active = app_state.presentations.iter()
+        .find(|p| p.id == presentation_id)
+        .map(|p| p.active)
+        .unwrap_or(false);
+    
+    if is_active {
+        let active_slides = get_active_slides(&app_state);
+        let msg = serde_json::json!({
+            "type": "state",
+            "slides": build_slides_json(&active_slides, &app_handle),
+            "current_index": app_state.current_slide_index,
+            "is_blackout": app_state.is_blackout,
+            "active_presentation_id": app_state.active_presentation_id,
+        }).to_string();
+        ws_clients.broadcast(msg);
+    }
+    
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+// COMANDOS DE IMAGEM (mantidos para compatibilidade)
 
 #[tauri::command]
 async fn upload_images_direct(
@@ -137,7 +384,6 @@ async fn upload_images_direct(
         if let Ok(img) = image::open(&original_path) {
             let (width, height) = img.dimensions();
             
-            // Otimizar imagem original se for muito grande
             let optimized_img = if width > 1920 || height > 1080 {
                 let aspect_ratio = width as f32 / height as f32;
                 let new_height = 1080u32;
@@ -147,10 +393,8 @@ async fn upload_images_direct(
                 img
             };
             
-            // Salvar imagem otimizada (JPEG qualidade 80%)
             let _ = optimized_img.save_with_format(&dest_path, ImageFormat::Jpeg);
             
-            // Thumbnail 400x300
             let thumb = optimized_img.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
             let _ = thumb.save_with_format(&thumb_path, ImageFormat::Jpeg);
         } else {
@@ -162,9 +406,23 @@ async fn upload_images_direct(
     }
     
     let mut app_state = state.write().await;
-    let start_order = app_state.slides.len();
-    for (i, (id, filename)) in new_slides.into_iter().enumerate() {
-        app_state.slides.push(Slide { id, filename, order: start_order + i });
+    
+    // Criar uma apresentação padrão se não existir
+    if app_state.presentations.is_empty() {
+        app_state.presentations.push(Presentation {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Apresentação Padrão".to_string(),
+            slides: Vec::new(),
+            active: false,
+        });
+    }
+    
+    // Adicionar slides à primeira apresentação
+    if let Some(pres) = app_state.presentations.first_mut() {
+        let start_order = pres.slides.len();
+        for (i, (id, filename)) in new_slides.into_iter().enumerate() {
+            pres.slides.push(Slide { id, filename, order: start_order + i });
+        }
     }
     
     save_state_to_disk(&app_state, &app_handle);
@@ -174,21 +432,27 @@ async fn upload_images_direct(
 #[tauri::command]
 async fn get_all_slides(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
-    serde_json::to_string(&app_state.slides).map_err(|e| e.to_string())
+    let active_slides = get_active_slides(&app_state);
+    serde_json::to_string(&active_slides).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn delete_slide(slide_id: String, state: tauri::State<'_, SharedState>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut app_state = state.write().await;
-    if let Some(slide) = app_state.slides.iter().find(|s| s.id == slide_id) {
-        let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
-        let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+    
+    // Procurar em todas as apresentações
+    for pres in &mut app_state.presentations {
+        if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
+            let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
+            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+        }
+        pres.slides.retain(|s| s.id != slide_id);
+        for (i, slide) in pres.slides.iter_mut().enumerate() { 
+            slide.order = i; 
+        }
     }
-    app_state.slides.retain(|s| s.id != slide_id);
-    for (i, slide) in app_state.slides.iter_mut().enumerate() { 
-        slide.order = i; 
-    }
+    
     save_state_to_disk(&app_state, &app_handle);
     Ok(())
 }
@@ -239,12 +503,14 @@ async fn set_blackout(value: bool, state: tauri::State<'_, SharedState>) -> Resu
 #[tauri::command]
 async fn get_display_state(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
-    let s = app_state.slides.get(app_state.current_slide_index);
+    let active_slides = get_active_slides(&app_state);
+    let s = active_slides.get(app_state.current_slide_index);
     let data = serde_json::json!({
         "current_index": app_state.current_slide_index,
-        "total_slides": app_state.slides.len(),
+        "total_slides": active_slides.len(),
         "is_blackout": app_state.is_blackout,
         "current_filename": s.map(|s| s.filename.clone()),
+        "active_presentation_id": app_state.active_presentation_id,
     });
     serde_json::to_string(&data).map_err(|e| e.to_string())
 }
@@ -307,6 +573,8 @@ async fn reset_texto_do_ano(app_handle: tauri::AppHandle) -> Result<(), String> 
     app_handle.emit("texto-do-ano-atualizado", ()).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// COMANDOS DO TIMER
 
 #[tauri::command]
 async fn timer_control(
@@ -390,6 +658,8 @@ async fn get_timer_state(state: tauri::State<'_, SharedState>) -> Result<String,
     Ok(timer_state.to_string())
 }
 
+// COMANDOS DE ÁGUA
+
 #[tauri::command]
 async fn request_water(
     state: tauri::State<'_, SharedState>,
@@ -431,6 +701,8 @@ async fn get_water_requests(state: tauri::State<'_, SharedState>) -> Result<Stri
     let app_state = state.read().await;
     serde_json::to_string(&app_state.water_requests).map_err(|e| e.to_string())
 }
+
+// COMANDOS DE INDICADOR
 
 #[tauri::command]
 async fn request_indicator(
@@ -478,6 +750,8 @@ async fn get_indicator_request(state: tauri::State<'_, SharedState>) -> Result<S
     let app_state = state.read().await;
     serde_json::to_string(&app_state.indicator_request).map_err(|e| e.to_string())
 }
+
+// COMANDOS DE MENSAGEM
 
 #[tauri::command]
 async fn send_operator_message(
@@ -533,6 +807,8 @@ async fn get_operator_message(state: tauri::State<'_, SharedState>) -> Result<St
     serde_json::to_string(&app_state.operator_message).map_err(|e| e.to_string())
 }
 
+// FUNÇÕES DE SISTEMA
+
 async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app_handle.get_webview_window("display") {
         w.set_always_on_top(false).ok();
@@ -555,6 +831,8 @@ async fn switch_to_sistema_internal(app_handle: &tauri::AppHandle) -> Result<(),
     app_handle.emit("switch-app", "sistema").ok();
     Ok(())
 }
+
+// WEBSOCKET SERVER
 
 fn start_ws_server(app_state: SharedState, app_handle: tauri::AppHandle, clients: Arc<WsClients>) {
     tauri::async_runtime::spawn(async move {
@@ -605,14 +883,17 @@ async fn handle_ws_connection(
                 }
             });
 
+            // Enviar estado inicial com slides ativos
             {
                 let state = app_state.read().await;
-                let slides = build_slides_json(&state.slides, &app_handle);
+                let active_slides = get_active_slides(&state);
+                let slides = build_slides_json(&active_slides, &app_handle);
                 let msg = serde_json::json!({ 
                     "type": "state", 
                     "slides": slides, 
                     "current_index": state.current_slide_index, 
-                    "is_blackout": state.is_blackout 
+                    "is_blackout": state.is_blackout,
+                    "active_presentation_id": state.active_presentation_id,
                 }).to_string();
                 let mut s = sender.lock().await;
                 let _ = s.send(Message::Text(msg)).await;
@@ -635,6 +916,19 @@ async fn handle_ws_connection(
                     "start_time": state.timer.start_time,
                 }).to_string();
                 let _ = s.send(Message::Text(timer_msg)).await;
+                
+                // Enviar mensagem do operador se existir
+                if let Some(ref msg) = state.operator_message {
+                    if !msg.acknowledged {
+                        let op_msg = serde_json::json!({
+                            "type": "operator_message",
+                            "id": msg.id,
+                            "text": msg.text,
+                            "timestamp": msg.timestamp,
+                        }).to_string();
+                        let _ = s.send(Message::Text(op_msg)).await;
+                    }
+                }
             }
 
             while let Some(msg_result) = receiver.next().await {
@@ -792,12 +1086,14 @@ async fn handle_ws_connection(
                             }
 
                             let response = {
-                                let slides = build_slides_json(&st.slides, &app_handle);
+                                let active_slides = get_active_slides(&st);
+                                let slides = build_slides_json(&active_slides, &app_handle);
                                 serde_json::json!({ 
                                     "type": "state", 
                                     "slides": slides, 
                                     "current_index": st.current_slide_index, 
-                                    "is_blackout": st.is_blackout 
+                                    "is_blackout": st.is_blackout,
+                                    "active_presentation_id": st.active_presentation_id,
                                 }).to_string()
                             };
                             let mut s = sender.lock().await;
@@ -821,35 +1117,7 @@ async fn handle_ws_connection(
     }
 }
 
-async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app_handle.get_webview_window("display") {
-        w.unminimize().map_err(|e| e.to_string())?; 
-        w.show().map_err(|e| e.to_string())?;
-        w.set_always_on_top(true).map_err(|e| e.to_string())?; 
-        w.set_fullscreen(true).map_err(|e| e.to_string())?;
-        w.set_focus().map_err(|e| e.to_string())?; 
-        return Ok(());
-    }
-    let window = WebviewWindowBuilder::new(app_handle, "display", tauri::WebviewUrl::App("/display".into()))
-        .title("Tela de Exibição")
-        .inner_size(800.0, 600.0)
-        .decorations(false)
-        .always_on_top(true)
-        .visible(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-    
-    if let Ok(monitors) = window.available_monitors() {
-        let target = if monitors.len() > 1 { &monitors[1] } else { &monitors[0] };
-        window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).map_err(|e| e.to_string())?;
-        window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).map_err(|e| e.to_string())?;
-    }
-    window.set_always_on_top(true).map_err(|e| e.to_string())?; 
-    window.set_fullscreen(true).map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?; 
-    window.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
-}
+// HTTP SERVER
 
 #[derive(RustEmbed)]
 #[folder = "../dist/"]
@@ -865,10 +1133,20 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
             .and(state_filter.clone())
             .and_then(|state: SharedState| async move {
                 let app_state = state.read().await;
+                let active_slides = get_active_slides(&app_state);
                 let json = serde_json::json!({
                     "current_slide_index": app_state.current_slide_index,
                     "is_blackout": app_state.is_blackout,
-                    "slides": app_state.slides.iter().map(|s| {
+                    "active_presentation_id": app_state.active_presentation_id,
+                    "presentations": app_state.presentations.iter().map(|p| {
+                        serde_json::json!({
+                            "id": p.id,
+                            "name": p.name,
+                            "active": p.active,
+                            "slides_count": p.slides.len()
+                        })
+                    }).collect::<Vec<_>>(),
+                    "slides": active_slides.iter().map(|s| {
                         serde_json::json!({
                             "id": s.id,
                             "filename": s.filename,
@@ -912,7 +1190,6 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                 Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"status": "ok"})))
             });
         
-        // NOVO: Servir imagens via HTTP
         let serve_image = warp::path!("images" / String)
             .and(warp::get())
             .and(handle_filter.clone())
@@ -933,7 +1210,6 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                 }
             });
         
-        // NOVO: Servir thumbnails via HTTP
         let serve_thumbnail = warp::path!("thumbnails" / String)
             .and(warp::get())
             .and(handle_filter.clone())
@@ -991,7 +1267,6 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
             .allow_methods(vec!["GET", "POST"])
             .allow_headers(vec!["Content-Type"]);
         
-        // Rotas: API primeiro, depois imagens, depois arquivos estáticos
         let routes = get_state
             .or(post_command)
             .or(serve_image)
@@ -1004,12 +1279,54 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
     });
 }
 
+async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app_handle.get_webview_window("display") {
+        w.unminimize().map_err(|e| e.to_string())?; 
+        w.show().map_err(|e| e.to_string())?;
+        w.set_always_on_top(true).map_err(|e| e.to_string())?; 
+        w.set_fullscreen(true).map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?; 
+        return Ok(());
+    }
+    let window = WebviewWindowBuilder::new(app_handle, "display", tauri::WebviewUrl::App("/display".into()))
+        .title("Tela de Exibição")
+        .inner_size(800.0, 600.0)
+        .decorations(false)
+        .always_on_top(true)
+        .visible(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    
+    if let Ok(monitors) = window.available_monitors() {
+        let target = if monitors.len() > 1 { &monitors[1] } else { &monitors[0] };
+        window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).map_err(|e| e.to_string())?;
+        window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).map_err(|e| e.to_string())?;
+    }
+    window.set_always_on_top(true).map_err(|e| e.to_string())?; 
+    window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?; 
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// MAIN
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = load_state_from_disk(&app.handle());
+            
+            // Garantir que nenhuma apresentação esteja ativa ao iniciar
+            let mut state = state;
+            for pres in &mut state.presentations {
+                pres.active = false;
+            }
+            state.active_presentation_id = None;
+            state.current_slide_index = 0;
+            state.is_blackout = true;
+            
             let shared_state: SharedState = Arc::new(RwLock::new(state));
             let clients = Arc::new(WsClients::new());
             
@@ -1029,7 +1346,9 @@ pub fn run() {
             timer_control, get_timer_state,
             request_water, acknowledge_water_request, get_water_requests,
             request_indicator, acknowledge_indicator_request, get_indicator_request,
-            send_operator_message, acknowledge_operator_message, get_operator_message
+            send_operator_message, acknowledge_operator_message, get_operator_message,
+            create_presentation, delete_presentation, set_active_presentation,
+            upload_images_to_presentation, delete_slide_from_presentation, get_presentations
         ])
         .run(tauri::generate_context!())
         .expect("erro");

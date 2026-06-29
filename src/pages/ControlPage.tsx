@@ -1,3 +1,4 @@
+// ControlPage.tsx
 import { useState, useEffect, useRef } from 'react';
 import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare } from 'lucide-react';
 import Timer from '../components/Timer';
@@ -12,9 +13,10 @@ function ControlPage() {
   const [timerAccumulated, setTimerAccumulated] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
   const [isPortrait, setIsPortrait] = useState(window.innerHeight > window.innerWidth);
-  const wsRef = useRef<WebSocket | null>(null);
   const [operatorMessage, setOperatorMessage] = useState<any>(null);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
+  const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -30,7 +32,6 @@ function ControlPage() {
 
   const getServerIp = () => window.location.hostname;
 
-  // Carregar thumbnail via HTTP
   const getThumbnailUrl = (filename: string) => {
     const ip = getServerIp();
     return `http://${ip}:20778/thumbnails/${filename}`;
@@ -47,7 +48,11 @@ function ControlPage() {
     try {
       const ws = new WebSocket(`ws://${ip}:20777`);
 
-      ws.onopen = () => { setConnected(true); setStatus('Conectado'); };
+      ws.onopen = () => { 
+        setConnected(true); 
+        setStatus('Conectado');
+        console.log('✅ Conectado ao operador');
+      };
 
       ws.onmessage = (event) => {
         try {
@@ -58,6 +63,7 @@ function ControlPage() {
             setSlides(newSlides);
             setCurrentIndex(data.current_index || 0);
             setIsBlackout(data.is_blackout);
+            setActivePresentationId(data.active_presentation_id || null);
             
             // Gerar URLs das thumbnails
             const urls: Record<string, string> = {};
@@ -65,6 +71,13 @@ function ControlPage() {
               urls[slide.filename] = getThumbnailUrl(slide.filename);
             });
             setThumbnailUrls(urls);
+            
+            console.log('📊 Estado recebido:', { 
+              slidesCount: newSlides.length, 
+              currentIndex: data.current_index,
+              isBlackout: data.is_blackout,
+              activePresentationId: data.active_presentation_id
+            });
           }
           
           if (data.type === 'timer_state') {
@@ -98,16 +111,37 @@ function ControlPage() {
           if (data.type === 'message_acknowledged') {
             setOperatorMessage(null);
           }
-        } catch (e) { console.error('Erro:', e); }
+        } catch (e) { 
+          console.error('Erro ao processar mensagem:', e); 
+        }
       };
 
-      ws.onclose = () => { setConnected(false); setTimeout(connect, 3000); };
-      ws.onerror = () => {};
+      ws.onclose = () => { 
+        console.log('🔴 Desconectado do operador. Reconectando em 3s...');
+        setConnected(false); 
+        setTimeout(connect, 3000); 
+      };
+      
+      ws.onerror = () => {
+        console.error('❌ Erro na conexão WebSocket');
+      };
+      
       wsRef.current = ws;
-    } catch (e) { setTimeout(connect, 5000); }
+    } catch (e) { 
+      console.error('❌ Erro ao conectar:', e);
+      setTimeout(connect, 5000); 
+    }
   };
 
-  useEffect(() => { connect(); return () => { if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); } }; }, []);
+  useEffect(() => { 
+    connect(); 
+    return () => { 
+      if (wsRef.current) { 
+        wsRef.current.onclose = null; 
+        wsRef.current.close(); 
+      } 
+    }; 
+  }, []);
 
   useEffect(() => {
     if (!connected) return;
@@ -194,6 +228,7 @@ function ControlPage() {
       top: 0,
       left: 0,
     }}>
+      {/* Header */}
       <div style={{ 
         display: 'flex',
         alignItems: 'center',
@@ -232,6 +267,7 @@ function ControlPage() {
         />
       </div>
 
+      {/* Botões de ação */}
       <div style={{
         display: 'flex',
         gap: '0.75rem',
@@ -265,6 +301,7 @@ function ControlPage() {
         </button>
       </div>
 
+      {/* Grid de imagens */}
       <div style={{ flex: 1, padding: '0.6rem', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {connected && slides.length > 0 ? (
           <div style={{ 
@@ -361,8 +398,12 @@ function ControlPage() {
                   <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
                 </svg>
               </div>
-              <p style={{ fontSize: '0.9rem', fontWeight: 600, color: '#8b949e', margin: 0 }}>Nenhuma imagem</p>
-              <p style={{ fontSize: '0.8rem', color: '#484f58', marginTop: '4px' }}>Aguardando operador</p>
+              <p style={{ fontSize: '0.9rem', fontWeight: 600, color: '#8b949e', margin: 0 }}>
+                {activePresentationId ? 'Nenhuma imagem ativa' : 'Nenhuma apresentação ativa'}
+              </p>
+              <p style={{ fontSize: '0.8rem', color: '#484f58', marginTop: '4px' }}>
+                Aguardando operador
+              </p>
             </div>
           </div>
         ) : (
@@ -375,6 +416,7 @@ function ControlPage() {
         )}
       </div>
 
+      {/* Mensagens de feedback */}
       {showSentMessage && (
         <div style={{
           position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
@@ -392,6 +434,7 @@ function ControlPage() {
         </div>
       )}
 
+      {/* Mensagem do operador */}
       {operatorMessage && (
         <div style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,

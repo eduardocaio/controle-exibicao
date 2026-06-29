@@ -1,13 +1,24 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Upload, Monitor, BookOpen, Trash2, Play, Square, Image, GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle} from 'lucide-react';
+import { 
+  Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
+  GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
+  FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban
+} from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
 import Timer from '../components/Timer';
 
+interface Presentation {
+  id: string;
+  name: string;
+  slides: any[];
+  active: boolean;
+}
+
 function AdminPage() {
-  const [images, setImages] = useState<any[]>([]);
+  const [presentations, setPresentations] = useState<Presentation[]>([]);
   const [monitors, setMonitors] = useState<string[]>([]);
   const [activeApp, setActiveApp] = useState<'sistema' | 'jw'>('sistema');
   const [showSettings, setShowSettings] = useState(false);
@@ -20,9 +31,12 @@ function AdminPage() {
   const [messageText, setMessageText] = useState('');
   const [sentMessage, setSentMessage] = useState<any>(null);
   const [messageAcknowledged, setMessageAcknowledged] = useState(false);
+  const [newPresentationName, setNewPresentationName] = useState('');
+  const [expandedPresentation, setExpandedPresentation] = useState<string | null>(null);
+  const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
-  useEffect(() => { loadImages(); checkDisplayState(); }, []);
+  useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
 
   useEffect(() => {
     const interval = setInterval(checkDisplayState, 500);
@@ -58,23 +72,21 @@ function AdminPage() {
     };
   }, []);
 
-  const handleSendMessage = async () => {
-    if (!messageText.trim()) return;
-    
+  const loadPresentations = async () => {
     try {
-        await invoke('send_operator_message', { text: messageText.trim() });
-        setSentMessage({ text: messageText.trim() });
-        setMessageText('');
-        setMessageAcknowledged(false);
-    } catch (e) {
-        console.error('Erro ao enviar mensagem:', e);
-    }
+      const pres = await invoke('get_presentations');
+      setPresentations(JSON.parse(pres as string) || []);
+      const parsed = JSON.parse(pres as string) || [];
+      const active = parsed.find((p: Presentation) => p.active);
+      setActivePresentationId(active?.id || null);
+    } catch (_) {}
   };
 
   const checkDisplayState = async () => {
     try {
       const s = JSON.parse(await invoke('get_display_state') as string);
       setIsBlackout(s.is_blackout);
+      setActivePresentationId(s.active_presentation_id || null);
       if (!s.is_blackout && s.current_filename) {
         setActiveImageIndex(s.current_index);
       } else {
@@ -83,37 +95,81 @@ function AdminPage() {
     } catch (_) {}
   };
 
-  const loadImages = async () => {
-    try {
-      const slides = await invoke('get_all_slides');
-      setImages(JSON.parse(slides as string) || []);
-    } catch (_) {}
-  };
-
   const loadThumb = async (filename: string) => {
     if (thumbCache[filename]) return thumbCache[filename];
-    
-    // Usar URL HTTP direta em vez de base64
     const url = `http://localhost:20778/thumbnails/${filename}`;
     setThumbCache(prev => ({ ...prev, [filename]: url }));
     return url;
   };
 
-  const handleUpload = async () => {
-    const f = await open({ multiple: true, filters: [{ name: 'Imagens', extensions: ['jpg','jpeg','png','webp','gif','bmp'] }] });
-    if (!f) return;
-    const paths = (Array.isArray(f) ? f : [f]).map(x => typeof x === 'string' ? x : (x as any).path);
-    await invoke('upload_images_direct', { filePaths: paths });
-    await loadImages();
+  const handleCreatePresentation = async () => {
+    if (!newPresentationName.trim()) return;
+    try {
+      await invoke('create_presentation', { name: newPresentationName.trim() });
+      setNewPresentationName('');
+      await loadPresentations();
+    } catch (e) {
+      console.error('Erro ao criar apresentação:', e);
+    }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDeletePresentation = async (id: string) => {
+    if (!confirm('Excluir esta apresentação e todas as suas imagens?')) return;
+    
+    // Verificar se é a apresentação ativa antes de deletar
+    const isActive = activePresentationId === id;
+    
+    await invoke('delete_presentation', { presentationId: id });
+    await loadPresentations();
+    
+    // Se deletou a apresentação ativa, alternar para JW Library
+    if (isActive) {
+      await handleSwitchToJW();
+    }
+  };
+
+  const handleUploadToPresentation = async (presentationId: string) => {
+    const f = await open({ 
+      multiple: true, 
+      filters: [{ name: 'Imagens', extensions: ['jpg','jpeg','png','webp','gif','bmp'] }] 
+    });
+    if (!f) return;
+    const paths = (Array.isArray(f) ? f : [f]).map(x => typeof x === 'string' ? x : (x as any).path);
+    await invoke('upload_images_to_presentation', { 
+      presentationId, 
+      filePaths: paths 
+    });
+    await loadPresentations();
+  };
+
+  const handleDeleteSlide = async (presentationId: string, slideId: string) => {
     if (!confirm('Excluir esta imagem?')) return;
-    await invoke('delete_slide', { slideId: id });
-    await loadImages();
+    await invoke('delete_slide_from_presentation', { presentationId, slideId });
+    await loadPresentations();
+  };
+
+  const handleSetActivePresentation = async (presentationId: string | null) => {
+    try {
+      await invoke('set_active_presentation', { presentationId });
+      await loadPresentations();
+      
+      // Se desativou a apresentação (passou null), alternar para JW Library
+      if (presentationId === null) {
+        await handleSwitchToJW();
+      }
+      // REMOVIDO o else que alternava para sistema quando ativava
+      // Agora mantém no JW Library mesmo quando ativa uma apresentação
+    } catch (e) {
+      console.error('Erro ao definir apresentação ativa:', e);
+    }
   };
 
   const handleShowImage = async (idx: number) => {
+    if (!activePresentationId) {
+      alert('Nenhuma apresentação ativa! Ative uma apresentação primeiro para exibir imagens.');
+      return;
+    }
+    
     await invoke('set_current_slide', { index: idx });
     await invoke('switch_to_sistema');
     setActiveImageIndex(idx);
@@ -129,14 +185,34 @@ function AdminPage() {
     setActiveApp('jw');
   };
 
-  const handleSwitchToJW = async () => { await invoke('switch_to_jw_library'); setActiveApp('jw'); };
-  const handleSwitchToSistema = async () => { await invoke('switch_to_sistema'); setActiveApp('sistema'); };
+  const handleSwitchToJW = async () => { 
+    await invoke('switch_to_jw_library'); 
+    setActiveApp('jw'); 
+  };
+  
+  const handleSwitchToSistema = async () => { 
+    await invoke('switch_to_sistema'); 
+    setActiveApp('sistema'); 
+  };
 
   const handleTimerControl = async (action: string) => {
     try {
       await invoke('timer_control', { action });
     } catch (e) {
       console.error('Erro no timer:', e);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!messageText.trim()) return;
+    
+    try {
+        await invoke('send_operator_message', { text: messageText.trim() });
+        setSentMessage({ text: messageText.trim() });
+        setMessageText('');
+        setMessageAcknowledged(false);
+    } catch (e) {
+        console.error('Erro ao enviar mensagem:', e);
     }
   };
 
@@ -187,15 +263,25 @@ function AdminPage() {
             </div>
             <div>
               <h1 style={{ fontSize:'1.4rem', fontWeight:700, margin:0, color:'#e1e4e8', letterSpacing:'-0.3px' }}>Controle de Exibição</h1>
-              <p style={{ opacity:0.5, margin:0, fontSize:'0.8rem', color:'#8b949e' }}>Gerencie suas imagens</p>
+              <p style={{ opacity:0.5, margin:0, fontSize:'0.8rem', color:'#8b949e' }}>
+                {activePresentationId ? (
+                  <span style={{ color: '#34d399', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#34d399' }} />
+                    Apresentação ativa
+                  </span>
+                ) : (
+                  <span style={{ color: '#f87171', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#f87171' }} />
+                    Nenhuma apresentação ativa
+                  </span>
+                )}
+              </p>
             </div>
           </div>
           
           <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
-            {/* Timer */}
             <Timer onControl={handleTimerControl} isOperator={true}/>
             
-            {/* Monitores */}
             {monitors.map((m,i) => (
               <span key={i} style={{ 
                 padding:'0.35rem 0.7rem', borderRadius:'20px', fontSize:'0.75rem',
@@ -208,7 +294,6 @@ function AdminPage() {
               </span>
             ))}
 
-            {/* Switch */}
             <div style={{ display:'flex', background:'rgba(255,255,255,0.03)', borderRadius:'8px', padding:'3px' }}>
               <button onClick={handleSwitchToJW} style={{
                 padding:'0.4rem 0.8rem', borderRadius:'6px', border:'none', cursor:'pointer',
@@ -242,7 +327,7 @@ function AdminPage() {
           </div>
         </div>
 
-        {/* Painel de Mensagem para o Orador */}
+        {/* Painel de Mensagem */}
         <div style={{ 
             background: 'linear-gradient(135deg, #111820 0%, #1a1f2e 100%)', 
             borderRadius: '16px', 
@@ -347,77 +432,118 @@ function AdminPage() {
             </div>
         </div>
 
-        {/* Conteúdo */}
-        <div style={{ background:'#111820', borderRadius:'16px', padding:'1.5rem', border:'1px solid rgba(255,255,255,0.04)' }}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'1.5rem' }}>
-            <div style={{ display:'flex', alignItems:'center', gap:'0.75rem' }}>
-              <h2 style={{ fontSize:'1rem', fontWeight:700, color:'#e1e4e8', margin:0 }}>Imagens</h2>
-              <span style={{ 
-                background:'rgba(102,126,234,0.12)', color:'#667eea',
-                padding:'0.15rem 0.5rem', borderRadius:'20px', fontSize:'0.72rem', fontWeight:600
-              }}>{images.length}</span>
-              {activeImageIndex !== null && (
-                <span style={{ 
-                  background:'rgba(239,68,68,0.1)', color:'#ef4444',
-                  padding:'0.15rem 0.5rem', borderRadius:'20px', fontSize:'0.72rem', fontWeight:600,
-                  display:'flex', alignItems:'center', gap:'0.3rem'
-                }}>
-                  <span style={{ width:'5px', height:'5px', borderRadius:'50%', backgroundColor:'#ef4444' }} />
-                  Imagem {activeImageIndex + 1} ativa
-                </span>
-              )}
+        {/* Criar Nova Apresentação */}
+        <div style={{ 
+          background:'#111820', borderRadius:'16px', padding:'1.25rem', 
+          marginBottom:'1rem', border:'1px solid rgba(255,255,255,0.04)' 
+        }}>
+          <div style={{ display:'flex', gap:'0.5rem', alignItems:'center' }}>
+            <div style={{
+              width:'36px', height:'36px', borderRadius:'8px',
+              background:'rgba(52,211,153,0.1)', display:'flex', 
+              alignItems:'center', justifyContent:'center'
+            }}>
+              <FolderPlus size={18} color="#34d399" />
             </div>
-            <button onClick={handleUpload} style={{ 
-              padding:'0.55rem 1rem', background:'#667eea', color:'#fff', 
-              border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600, 
-              fontSize:'0.82rem', display:'flex', alignItems:'center', gap:'0.4rem',
-              transition:'all 0.15s'
-            }}
-            onMouseEnter={e => e.currentTarget.style.background = '#5a6fd6'}
-            onMouseLeave={e => e.currentTarget.style.background = '#667eea'}>
-              <Upload size={15} /> Adicionar Imagens
+            <input
+              type="text"
+              value={newPresentationName}
+              onChange={(e) => setNewPresentationName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreatePresentation()}
+              placeholder="Nome da nova apresentação..."
+              style={{
+                flex: 1,
+                padding:'0.6rem 0.8rem',
+                background:'rgba(255,255,255,0.03)',
+                border:'1px solid rgba(255,255,255,0.06)',
+                borderRadius:'8px',
+                color:'#e1e4e8',
+                fontSize:'0.85rem',
+                outline:'none'
+              }}
+            />
+            <button onClick={handleCreatePresentation} disabled={!newPresentationName.trim()} style={{
+              padding:'0.6rem 1.2rem',
+              background: newPresentationName.trim() ? '#34d399' : 'rgba(52,211,153,0.3)',
+              color:'#000', border:'none', borderRadius:'8px',
+              cursor: newPresentationName.trim() ? 'pointer' : 'not-allowed',
+              fontWeight:700, fontSize:'0.85rem',
+              display:'flex', alignItems:'center', gap:'0.4rem'
+            }}>
+              <Plus size={16} /> Criar
             </button>
           </div>
-
-          {images.length === 0 ? (
-            <div onClick={handleUpload} style={{ 
-              textAlign:'center', padding:'4rem 2rem', 
-              background:'rgba(255,255,255,0.01)', borderRadius:'12px', 
-              border:'2px dashed rgba(255,255,255,0.06)', cursor:'pointer',
-              transition:'all 0.2s'
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(102,126,234,0.3)'; e.currentTarget.style.background = 'rgba(102,126,234,0.03)'; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)'; e.currentTarget.style.background = 'rgba(255,255,255,0.01)'; }}>
-              <div style={{
-                width:'56px', height:'56px', borderRadius:'14px',
-                background:'rgba(102,126,234,0.08)', display:'flex', alignItems:'center', justifyContent:'center',
-                margin:'0 auto 1rem'
-              }}>
-                <Upload size={24} color="#667eea" style={{ opacity:0.6 }} />
-              </div>
-              <p style={{ color:'#8b949e', fontWeight:500, margin:0, fontSize:'0.9rem' }}>Nenhuma imagem adicionada</p>
-              <p style={{ color:'#484f58', fontSize:'0.78rem', marginTop:'4px' }}>Clique ou arraste para adicionar</p>
-            </div>
-          ) : (
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:'0.75rem' }}>
-              {images.map((img: any, idx: number) => (
-                <ThumbCard 
-                  key={img.id} 
-                  img={img} 
-                  idx={idx} 
-                  loadThumb={loadThumb} 
-                  thumbCache={thumbCache} 
-                  onDelete={handleDelete}
-                  onShow={handleShowImage}
-                  onHide={handleHideImage}
-                  isActive={activeImageIndex === idx && !isBlackout}
-                  isHovered={hoveredId === img.id}
-                  onHover={setHoveredId}
-                />
-              ))}
-            </div>
-          )}
         </div>
+
+        {/* Alerta de apresentação não ativa */}
+        {presentations.length > 0 && !activePresentationId && (
+          <div style={{
+            background: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.2)',
+            borderRadius: '12px',
+            padding: '0.75rem 1rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.6rem',
+            fontSize: '0.82rem',
+            color: '#fbbf24'
+          }}>
+            <AlertTriangle size={16} />
+            <span>Nenhuma apresentação ativa. Ative uma apresentação para poder exibir imagens no tablet.</span>
+          </div>
+        )}
+
+        {/* Lista de Apresentações */}
+        {presentations.length === 0 ? (
+          <div style={{ 
+            textAlign:'center', padding:'4rem 2rem', 
+            background:'#111820', borderRadius:'16px', 
+            border:'1px solid rgba(255,255,255,0.04)'
+          }}>
+            <div style={{
+              width:'56px', height:'56px', borderRadius:'14px',
+              background:'rgba(102,126,234,0.08)', display:'flex', alignItems:'center', justifyContent:'center',
+              margin:'0 auto 1rem'
+            }}>
+              <Folder size={24} color="#667eea" style={{ opacity:0.6 }} />
+            </div>
+            <p style={{ color:'#8b949e', fontWeight:500, margin:0, fontSize:'0.9rem' }}>
+              Nenhuma apresentação criada
+            </p>
+            <p style={{ color:'#484f58', fontSize:'0.78rem', marginTop:'4px' }}>
+              Crie uma apresentação para começar
+            </p>
+          </div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:'0.75rem' }}>
+            {presentations.map((pres) => (
+              <PresentationCard
+                key={pres.id}
+                presentation={pres}
+                isExpanded={expandedPresentation === pres.id}
+                isActive={pres.active}
+                onToggleExpand={() => setExpandedPresentation(
+                  expandedPresentation === pres.id ? null : pres.id
+                )}
+                onDelete={handleDeletePresentation}
+                onUpload={handleUploadToPresentation}
+                onDeleteSlide={handleDeleteSlide}
+                onSetActive={handleSetActivePresentation}
+                onShowImage={handleShowImage}
+                onHideImage={handleHideImage}
+                activeImageIndex={activeImageIndex}
+                isBlackout={isBlackout}
+                thumbCache={thumbCache}
+                loadThumb={loadThumb}
+                hoveredId={hoveredId}
+                setHoveredId={setHoveredId}
+                isCurrentActivePresentation={activePresentationId === pres.id}
+                canShowImages={!!activePresentationId}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Alertas */}
@@ -578,21 +704,185 @@ function AdminPage() {
 
       <style>{`
         @keyframes slideInRight {
-          from {
-            transform: translateX(100%);
-            opacity: 0;
-          }
-          to {
-            transform: translateX(0);
-            opacity: 1;
-          }
+          from { transform: translateX(100%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
         }
       `}</style>
     </div>
   );
 }
 
-function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, isActive, isHovered, onHover }: any) {
+// Componente para cada apresentação
+function PresentationCard({ 
+  presentation, isExpanded, isActive, onToggleExpand, onDelete, onUpload, 
+  onDeleteSlide, onSetActive, onShowImage, onHideImage, activeImageIndex, 
+  isBlackout, thumbCache, loadThumb, hoveredId, setHoveredId, 
+  isCurrentActivePresentation, canShowImages 
+}: any) {
+  return (
+    <div style={{ 
+      background:'#111820', borderRadius:'16px', 
+      border: isActive ? '2px solid rgba(52,211,153,0.3)' : '1px solid rgba(255,255,255,0.04)',
+      overflow:'hidden',
+      boxShadow: isActive ? '0 0 20px rgba(52,211,153,0.1)' : 'none'
+    }}>
+      {/* Cabeçalho da Apresentação */}
+      <div style={{ 
+        padding:'1rem 1.25rem', display:'flex', justifyContent:'space-between', 
+        alignItems:'center', gap:'0.75rem',
+        background: isActive ? 'rgba(52,211,153,0.05)' : 'transparent'
+      }}>
+        <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flex:1 }}>
+          <button onClick={onToggleExpand} style={{
+            background:'none', border:'none', cursor:'pointer', color:'#8b949e',
+            padding:'4px', borderRadius:'4px', display:'flex',
+            transition:'transform 0.2s',
+            transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)'
+          }}>
+            <ChevronRight size={18} />
+          </button>
+          <div style={{
+            width:'36px', height:'36px', borderRadius:'8px',
+            background: isActive ? 'rgba(52,211,153,0.15)' : 'rgba(255,255,255,0.04)',
+            display:'flex', alignItems:'center', justifyContent:'center'
+          }}>
+            <Folder size={18} color={isActive ? '#34d399' : '#8b949e'} />
+          </div>
+          <div>
+            <div style={{ display:'flex', alignItems:'center', gap:'0.5rem' }}>
+              <h3 style={{ margin:0, fontSize:'0.95rem', fontWeight:700, color:'#e1e4e8' }}>
+                {presentation.name}
+              </h3>
+              {isActive && (
+                <span style={{
+                  padding:'0.15rem 0.5rem', borderRadius:'20px',
+                  background:'rgba(52,211,153,0.15)', color:'#34d399',
+                  fontSize:'0.7rem', fontWeight:600
+                }}>
+                  Ativa
+                </span>
+              )}
+              {!isActive && (
+                <span style={{
+                  padding:'0.15rem 0.5rem', borderRadius:'20px',
+                  background:'rgba(245,158,11,0.1)', color:'#fbbf24',
+                  fontSize:'0.65rem', fontWeight:600
+                }}>
+                  Inativa
+                </span>
+              )}
+            </div>
+            <p style={{ margin:'2px 0 0', fontSize:'0.75rem', color:'#484f58' }}>
+              {presentation.slides.length} {presentation.slides.length !== 1 ? 'imagens' : 'imagem'}
+            </p>
+          </div>
+        </div>
+        
+        <div style={{ display:'flex', gap:'0.5rem', alignItems:'center' }}>
+          <button onClick={() => onUpload(presentation.id)} style={{
+            padding:'0.45rem 0.75rem',
+            background:'rgba(102,126,234,0.1)', color:'#667eea',
+            border:'1px solid rgba(102,126,234,0.2)', borderRadius:'8px',
+            cursor:'pointer', fontSize:'0.75rem', fontWeight:600,
+            display:'flex', alignItems:'center', gap:'0.3rem',
+            transition:'all 0.15s'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(102,126,234,0.2)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'rgba(102,126,234,0.1)'}>
+            <Upload size={13} /> Adicionar
+          </button>
+          
+          {isActive ? (
+            <button onClick={() => onSetActive(null)} style={{
+              padding:'0.45rem 0.75rem',
+              background:'rgba(239,68,68,0.1)', color:'#ef4444',
+              border:'1px solid rgba(239,68,68,0.2)', borderRadius:'8px',
+              cursor:'pointer', fontSize:'0.75rem', fontWeight:600,
+              display:'flex', alignItems:'center', gap:'0.3rem',
+              transition:'all 0.15s'
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.1)'}>
+              <EyeOff size={13} /> Desativar
+            </button>
+          ) : (
+            <button onClick={() => onSetActive(presentation.id)} style={{
+              padding:'0.45rem 0.75rem',
+              background:'rgba(52,211,153,0.1)', color:'#34d399',
+              border:'1px solid rgba(52,211,153,0.2)', borderRadius:'8px',
+              cursor:'pointer', fontSize:'0.75rem', fontWeight:600,
+              display:'flex', alignItems:'center', gap:'0.3rem',
+              transition:'all 0.15s'
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'rgba(52,211,153,0.2)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'rgba(52,211,153,0.1)'}>
+              <Eye size={13} /> Ativar
+            </button>
+          )}
+          
+          <button onClick={() => onDelete(presentation.id)} style={{
+            padding:'0.45rem', background:'rgba(239,68,68,0.05)',
+            color:'#f87171', border:'1px solid rgba(239,68,68,0.1)',
+            borderRadius:'8px', cursor:'pointer', display:'flex',
+            transition:'all 0.15s'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.15)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.05)'}>
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+      
+      {/* Slides da Apresentação (expandido) */}
+      {isExpanded && (
+        <div style={{ 
+          padding:'0 1.25rem 1.25rem',
+          borderTop:'1px solid rgba(255,255,255,0.04)'
+        }}>
+          {presentation.slides.length === 0 ? (
+            <div style={{ 
+              textAlign:'center', padding:'2rem',
+              color:'#484f58', fontSize:'0.85rem'
+            }}>
+              Nenhuma imagem nesta apresentação
+            </div>
+          ) : (
+            <div style={{ 
+              display:'grid', 
+              gridTemplateColumns:'repeat(auto-fill, minmax(180px, 1fr))', 
+              gap:'0.75rem', 
+              marginTop:'1rem' 
+            }}>
+              {presentation.slides.map((slide: any, idx: number) => (
+                <ThumbCard 
+                  key={slide.id} 
+                  img={slide} 
+                  idx={idx} 
+                  loadThumb={loadThumb} 
+                  thumbCache={thumbCache} 
+                  onDelete={() => onDeleteSlide(presentation.id, slide.id)}
+                  onShow={() => onShowImage(idx)}
+                  onHide={onHideImage}
+                  isActive={isCurrentActivePresentation && activeImageIndex === idx && !isBlackout}
+                  isHovered={hoveredId === slide.id}
+                  onHover={setHoveredId}
+                  canShow={isActive}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Componente ThumbCard
+function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, isActive, isHovered, onHover, canShow }: any) {
   const [src, setSrc] = useState('');
 
   useEffect(() => {
@@ -614,7 +904,8 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
         overflow:'hidden', 
         border: isActive ? '1px solid rgba(239,68,68,0.25)' : '1px solid rgba(255,255,255,0.04)',
         boxShadow: isActive ? '0 0 20px rgba(239,68,68,0.08)' : 'none',
-        transition:'all 0.2s ease'
+        transition:'all 0.2s ease',
+        opacity: canShow ? 1 : 0.85
       }}>
       <div style={{ 
         height:'130px', 
@@ -623,7 +914,16 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
         overflow:'hidden', position:'relative'
       }}>
         {src ? (
-          <img src={src} alt={`Imagem ${idx+1}`} style={{ width:'100%', height:'100%', objectFit:'cover', filter: isActive ? 'brightness(1.05)' : 'brightness(0.85)' }} />
+          <img 
+            src={src} 
+            alt={`Imagem ${idx+1}`} 
+            style={{ 
+              width:'100%', 
+              height:'100%', 
+              objectFit:'cover', 
+              filter: isActive ? 'brightness(1.05)' : canShow ? 'brightness(0.85)' : 'brightness(0.7)'
+            }} 
+          />
         ) : (
           <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:'0.3rem' }}>
             <div style={{ width:'32px', height:'32px', borderRadius:'8px', background:'rgba(255,255,255,0.03)', display:'flex', alignItems:'center', justifyContent:'center' }}>
@@ -633,22 +933,96 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
           </div>
         )}
         
-        {isHovered && !isActive && (
+        {/* Hover com botão Exibir habilitado (apresentação ativa) */}
+        {isHovered && !isActive && canShow && (
           <div style={{
             position:'absolute', top:0, left:0, right:0, bottom:0,
             background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center',
             transition:'all 0.15s'
           }}>
-            <button onClick={() => onShow(idx)} style={{
-              padding:'0.5rem 0.8rem', background:'#667eea', color:'#fff',
-              border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600,
-              fontSize:'0.75rem', display:'flex', alignItems:'center', gap:'0.3rem'
-            }}>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                onShow(idx);
+              }}
+              style={{
+                padding:'0.5rem 0.8rem', 
+                background:'#667eea', 
+                color:'#fff',
+                border:'none', 
+                borderRadius:'6px', 
+                cursor:'pointer', 
+                fontWeight:600,
+                fontSize:'0.75rem', 
+                display:'flex', 
+                alignItems:'center', 
+                gap:'0.3rem',
+                transition:'all 0.15s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = '#5a6fd6'}
+              onMouseLeave={e => e.currentTarget.style.background = '#667eea'}
+            >
               <Play size={13} /> Exibir
             </button>
           </div>
         )}
 
+        {/* Hover com botão Exibir desabilitado (apresentação inativa) */}
+        {isHovered && !isActive && !canShow && (
+          <div style={{
+            position:'absolute', top:0, left:0, right:0, bottom:0,
+            background:'rgba(0,0,0,0.75)', 
+            display:'flex', 
+            flexDirection:'column', 
+            alignItems:'center', 
+            justifyContent:'center',
+            transition:'all 0.15s', 
+            gap:'0.6rem'
+          }}>
+            <div style={{
+              width:'36px', 
+              height:'36px', 
+              borderRadius:'50%',
+              background:'rgba(245,158,11,0.15)', 
+              border:'1.5px solid rgba(245,158,11,0.3)',
+              display:'flex', 
+              alignItems:'center', 
+              justifyContent:'center'
+            }}>
+              <EyeOff size={18} color="#fbbf24" />
+            </div>
+            <button 
+              disabled
+              style={{
+                padding:'0.5rem 0.8rem', 
+                background:'rgba(245,158,11,0.1)', 
+                color:'#fbbf24',
+                border:'1px solid rgba(245,158,11,0.2)', 
+                borderRadius:'6px', 
+                cursor:'not-allowed', 
+                fontWeight:600,
+                fontSize:'0.7rem', 
+                display:'flex', 
+                alignItems:'center', 
+                gap:'0.3rem',
+                opacity: 0.8
+              }}
+            >
+              <Ban size={12} /> Indisponível
+            </button>
+            <span style={{ 
+              fontSize:'0.65rem', 
+              color:'#fbbf24', 
+              opacity: 0.7,
+              textAlign: 'center',
+              lineHeight: '1.2'
+            }}>
+              Ative a apresentação<br />para exibir
+            </span>
+          </div>
+        )}
+
+        {/* Imagem ativa (sendo exibida) */}
         {isActive && (
           <div style={{
             position:'absolute', top:0, left:0, right:0, bottom:0,
@@ -662,11 +1036,24 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
             }}>
               <div style={{ width:'10px', height:'10px', borderRadius:'2px', background:'rgba(239,68,68,0.8)' }} />
             </div>
-            <button onClick={() => onHide()} style={{
-              padding:'0.35rem 0.7rem', background:'rgba(239,68,68,0.15)', color:'rgba(239,68,68,0.9)',
-              border:'1px solid rgba(239,68,68,0.25)', borderRadius:'6px', cursor:'pointer',
-              fontWeight:600, fontSize:'0.7rem', letterSpacing:'0.5px', textTransform:'uppercase'
-            }}>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                onHide();
+              }}
+              style={{
+                padding:'0.35rem 0.7rem', 
+                background:'rgba(239,68,68,0.15)', 
+                color:'rgba(239,68,68,0.9)',
+                border:'1px solid rgba(239,68,68,0.25)', 
+                borderRadius:'6px', 
+                cursor:'pointer',
+                fontWeight:600, 
+                fontSize:'0.7rem', 
+                letterSpacing:'0.5px', 
+                textTransform:'uppercase'
+              }}
+            >
               <Square size={11} style={{ marginRight:'4px' }} />
               Encerrar
             </button>
@@ -680,15 +1067,42 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
         borderTop:'1px solid rgba(255,255,255,0.03)',
         background: isActive ? 'rgba(239,68,68,0.04)' : 'transparent'
       }}>
-        <span style={{ fontSize:'0.72rem', fontWeight:600, color: isActive ? 'rgba(239,68,68,0.85)' : '#8b949e' }}>
-          Imagem {idx+1}
-        </span>
-        <button onClick={() => onDelete(img.id)} style={{ 
-          background:'none', border:'none', color:'#484f58', cursor:'pointer', padding:'2px',
-          transition:'color 0.15s'
-        }}
-        onMouseEnter={e => e.currentTarget.style.color = '#f87171'}
-        onMouseLeave={e => e.currentTarget.style.color = '#484f58'}>
+        <div style={{ display:'flex', alignItems:'center', gap:'0.4rem' }}>
+          <span style={{ 
+            fontSize:'0.72rem', 
+            fontWeight:600, 
+            color: isActive ? 'rgba(239,68,68,0.85)' : '#8b949e' 
+          }}>
+            Imagem {idx+1}
+          </span>
+          {!canShow && (
+            <span style={{
+              fontSize:'0.6rem',
+              padding:'0.1rem 0.3rem',
+              borderRadius:'3px',
+              background:'rgba(245,158,11,0.15)',
+              color:'#fbbf24'
+            }}>
+              Inativa
+            </span>
+          )}
+        </div>
+        <button 
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(img.id);
+          }}
+          style={{ 
+            background:'none', 
+            border:'none', 
+            color:'#484f58', 
+            cursor:'pointer', 
+            padding:'2px',
+            transition:'color 0.15s'
+          }}
+          onMouseEnter={e => e.currentTarget.style.color = '#f87171'}
+          onMouseLeave={e => e.currentTarget.style.color = '#484f58'}
+        >
           <Trash2 size={13} />
         </button>
       </div>
