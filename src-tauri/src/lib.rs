@@ -16,6 +16,8 @@ use futures_util::{StreamExt, SinkExt};
 use warp::Filter;
 use rust_embed::RustEmbed;
 use mime_guess::from_path;
+use image::ImageFormat;
+use image::GenericImageView;
 
 // Estrutura para gerenciar conexões WebSocket
 struct WsClients {
@@ -31,14 +33,12 @@ impl WsClients {
     
     fn broadcast(&self, msg: String) {
         if let Ok(senders) = self.senders.lock() {
-            // Limpar senders que foram desconectados
             let mut active_senders = Vec::new();
             for sender in senders.iter() {
                 if sender.send(msg.clone()).is_ok() {
                     active_senders.push(sender.clone());
                 }
             }
-            // Não podemos modificar o Vec enquanto iteramos, então fazemos depois
             drop(senders);
             if let Ok(mut senders) = self.senders.lock() {
                 *senders = active_senders;
@@ -61,48 +61,46 @@ fn save_state_to_disk(state: &AppState, app_handle: &tauri::AppHandle) {
     let data_dir = get_data_dir(app_handle);
     let _ = fs::create_dir_all(&data_dir);
     let state_file = data_dir.join("state.json");
-    if let Ok(json) = serde_json::to_string_pretty(state) { let _ = fs::write(state_file, json); }
+    if let Ok(json) = serde_json::to_string_pretty(state) { 
+        let _ = fs::write(state_file, json); 
+    }
 }
 
 fn load_state_from_disk(app_handle: &tauri::AppHandle) -> AppState {
     let data_dir = get_data_dir(app_handle);
     let state_file = data_dir.join("state.json");
     if let Ok(content) = fs::read_to_string(state_file) {
-        if let Ok(state) = serde_json::from_str(&content) { return state; }
+        if let Ok(state) = serde_json::from_str(&content) { 
+            return state; 
+        }
     }
     AppState::new()
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let combined = (b0 << 16) | (b1 << 8) | b2;
-        result.push(alphabet.chars().nth(((combined >> 18) & 63) as usize).unwrap());
-        result.push(alphabet.chars().nth(((combined >> 12) & 63) as usize).unwrap());
-        result.push(if chunk.len() > 1 { alphabet.chars().nth(((combined >> 6) & 63) as usize).unwrap() } else { '=' });
-        result.push(if chunk.len() > 2 { alphabet.chars().nth((combined & 63) as usize).unwrap() } else { '=' });
-    }
-    result
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn get_thumbnail_base64(app_handle: &tauri::AppHandle, filename: &str) -> String {
-    let app_dir = app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let app_dir = get_data_dir(app_handle);
     let thumb_path = app_dir.join("thumbnails").join(filename);
     if let Ok(bytes) = fs::read(&thumb_path) {
         let b64 = base64_encode(&bytes);
         let ext = thumb_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
         format!("data:image/{};base64,{}", ext, b64)
-    } else { String::new() }
+    } else { 
+        String::new() 
+    }
 }
 
-fn build_slides_json(slides: &Vec<Slide>, app_handle: &tauri::AppHandle) -> Vec<serde_json::Value> {
+fn build_slides_json(slides: &Vec<Slide>, _app_handle: &tauri::AppHandle) -> Vec<serde_json::Value> {
     slides.iter().map(|sl| {
-        let thumb = get_thumbnail_base64(app_handle, &sl.filename);
-        serde_json::json!({ "id": sl.id, "filename": sl.filename, "order": sl.order, "thumbnail": thumb })
+        serde_json::json!({ 
+            "id": sl.id, 
+            "filename": sl.filename, 
+            "order": sl.order
+        })
     }).collect()
 }
 
@@ -134,15 +132,32 @@ async fn upload_images_direct(
         let extension = original_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
         let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), extension);
         let dest_path = images_dir.join(&new_filename);
-        fs::copy(&original_path, &dest_path).map_err(|e| e.to_string())?;
         let thumb_path = thumbs_dir.join(&new_filename);
-        if let Ok(img) = image::open(&dest_path) {
-            let thumb = img.resize(400, 300, image::imageops::FilterType::Lanczos3);
-            // Salvar com qualidade JPEG 85% (bom equilíbrio qualidade/tamanho)
-            let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+        
+        if let Ok(img) = image::open(&original_path) {
+            let (width, height) = img.dimensions();
+            
+            // Otimizar imagem original se for muito grande
+            let optimized_img = if width > 1920 || height > 1080 {
+                let aspect_ratio = width as f32 / height as f32;
+                let new_height = 1080u32;
+                let new_width = (new_height as f32 * aspect_ratio) as u32;
+                img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            
+            // Salvar imagem otimizada (JPEG qualidade 80%)
+            let _ = optimized_img.save_with_format(&dest_path, ImageFormat::Jpeg);
+            
+            // Thumbnail 400x300
+            let thumb = optimized_img.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+            let _ = thumb.save_with_format(&thumb_path, ImageFormat::Jpeg);
         } else {
-            let _ = fs::copy(&dest_path, &thumb_path); 
+            let _ = fs::copy(&original_path, &dest_path);
+            let _ = fs::copy(&original_path, &thumb_path);
         }
+        
         new_slides.push((uuid::Uuid::new_v4().to_string(), new_filename));
     }
     
@@ -171,7 +186,9 @@ async fn delete_slide(slide_id: String, state: tauri::State<'_, SharedState>, ap
         let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
     }
     app_state.slides.retain(|s| s.id != slide_id);
-    for (i, slide) in app_state.slides.iter_mut().enumerate() { slide.order = i; }
+    for (i, slide) in app_state.slides.iter_mut().enumerate() { 
+        slide.order = i; 
+    }
     save_state_to_disk(&app_state, &app_handle);
     Ok(())
 }
@@ -191,8 +208,11 @@ async fn get_image_base64(filename: String, is_thumb: bool, app_handle: tauri::A
 async fn get_default_image(app_handle: tauri::AppHandle) -> Result<String, String> {
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let custom_path = app_dir.join("resources").join("texto-do-ano.jpg");
-    let img_path = if custom_path.exists() { custom_path }
-    else { app_handle.path().resource_dir().map_err(|e| e.to_string())?.join("resources").join("texto-do-ano.jpg") };
+    let img_path = if custom_path.exists() { 
+        custom_path 
+    } else { 
+        app_handle.path().resource_dir().map_err(|e| e.to_string())?.join("resources").join("texto-do-ano.jpg") 
+    };
     if img_path.exists() {
         let bytes = fs::read(&img_path).map_err(|e| e.to_string())?;
         let b64 = base64_encode(&bytes);
@@ -230,19 +250,27 @@ async fn get_display_state(state: tauri::State<'_, SharedState>) -> Result<Strin
 }
 
 #[tauri::command]
-async fn show_display_window(app_handle: tauri::AppHandle) -> Result<(), String> { show_display_window_internal(&app_handle).await }
+async fn show_display_window(app_handle: tauri::AppHandle) -> Result<(), String> { 
+    show_display_window_internal(&app_handle).await 
+}
 
 #[tauri::command]
-async fn switch_to_jw_library(app_handle: tauri::AppHandle) -> Result<(), String> { switch_to_jw_library_internal(&app_handle).await }
+async fn switch_to_jw_library(app_handle: tauri::AppHandle) -> Result<(), String> { 
+    switch_to_jw_library_internal(&app_handle).await 
+}
 
 #[tauri::command]
-async fn switch_to_sistema(app_handle: tauri::AppHandle) -> Result<(), String> { switch_to_sistema_internal(&app_handle).await }
+async fn switch_to_sistema(app_handle: tauri::AppHandle) -> Result<(), String> { 
+    switch_to_sistema_internal(&app_handle).await 
+}
 
 #[tauri::command]
 async fn get_monitors(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
     if let Some(w) = app_handle.get_webview_window("main") {
         if let Ok(monitors) = w.available_monitors() {
-            return Ok(monitors.iter().enumerate().map(|(i, m)| format!("Monitor {}: {}x{}", i + 1, m.size().width, m.size().height)).collect());
+            return Ok(monitors.iter().enumerate().map(|(i, m)| 
+                format!("Monitor {}: {}x{}", i + 1, m.size().width, m.size().height)
+            ).collect());
         }
     }
     Ok(vec!["Não detectado".into()])
@@ -262,20 +290,23 @@ async fn set_texto_do_ano(file_path: String, app_handle: tauri::AppHandle) -> Re
 async fn get_texto_do_ano_path(app_handle: tauri::AppHandle) -> Result<String, String> {
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let custom_path = app_dir.join("resources").join("texto-do-ano.jpg");
-    if custom_path.exists() { Ok(custom_path.to_string_lossy().to_string()) }
-    else { Ok(String::new()) }
+    if custom_path.exists() { 
+        Ok(custom_path.to_string_lossy().to_string()) 
+    } else { 
+        Ok(String::new()) 
+    }
 }
 
 #[tauri::command]
 async fn reset_texto_do_ano(app_handle: tauri::AppHandle) -> Result<(), String> {
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let custom_path = app_dir.join("resources").join("texto-do-ano.jpg");
-    if custom_path.exists() { fs::remove_file(&custom_path).map_err(|e| e.to_string())?; }
+    if custom_path.exists() { 
+        fs::remove_file(&custom_path).map_err(|e| e.to_string())?; 
+    }
     app_handle.emit("texto-do-ano-atualizado", ()).map_err(|e| e.to_string())?;
     Ok(())
 }
-
-// ===== NOVAS FUNCIONALIDADES =====
 
 #[tauri::command]
 async fn timer_control(
@@ -323,10 +354,8 @@ async fn timer_control(
         "start_time": app_state.timer.start_time,
     });
     
-    // Emitir para o Admin (evento Tauri)
     app_handle.emit("timer-update", &timer_state).map_err(|e| e.to_string())?;
     
-    // Broadcast para todos os Oradores conectados via WebSocket
     let ws_msg = serde_json::json!({
         "type": "timer_state",
         "running": app_state.timer.running,
@@ -339,9 +368,7 @@ async fn timer_control(
 }
 
 #[tauri::command]
-async fn get_timer_state(
-    state: tauri::State<'_, SharedState>,
-) -> Result<String, String> {
+async fn get_timer_state(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -381,9 +408,7 @@ async fn request_water(
     };
     
     app_state.water_requests.push(request.clone());
-    
     app_handle.emit("water-request", &request).map_err(|e| e.to_string())?;
-    
     Ok(())
 }
 
@@ -397,16 +422,12 @@ async fn acknowledge_water_request(
     if let Some(req) = app_state.water_requests.iter_mut().find(|r| r.id == request_id) {
         req.acknowledged = true;
     }
-    
     app_handle.emit("water-request-acknowledged", &request_id).map_err(|e| e.to_string())?;
-    
     Ok(())
 }
 
 #[tauri::command]
-async fn get_water_requests(
-    state: tauri::State<'_, SharedState>,
-) -> Result<String, String> {
+async fn get_water_requests(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
     serde_json::to_string(&app_state.water_requests).map_err(|e| e.to_string())
 }
@@ -435,9 +456,7 @@ async fn request_indicator(
     };
     
     app_state.indicator_request = Some(request.clone());
-    
     app_handle.emit("indicator-request", &request).map_err(|e| e.to_string())?;
-    
     Ok(())
 }
 
@@ -450,16 +469,12 @@ async fn acknowledge_indicator_request(
     if let Some(ref mut req) = app_state.indicator_request {
         req.acknowledged = true;
     }
-    
     app_handle.emit("indicator-request-acknowledged", true).map_err(|e| e.to_string())?;
-    
     Ok(())
 }
 
 #[tauri::command]
-async fn get_indicator_request(
-    state: tauri::State<'_, SharedState>,
-) -> Result<String, String> {
+async fn get_indicator_request(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
     serde_json::to_string(&app_state.indicator_request).map_err(|e| e.to_string())
 }
@@ -485,11 +500,8 @@ async fn send_operator_message(
     };
     
     app_state.operator_message = Some(message.clone());
-    
-    // Emitir para o Admin
     app_handle.emit("operator-message-sent", &message).map_err(|e| e.to_string())?;
     
-    // Enviar para o Orador via WebSocket
     let ws_msg = serde_json::json!({
         "type": "operator_message",
         "id": message.id,
@@ -510,18 +522,13 @@ async fn acknowledge_operator_message(
     if let Some(ref mut msg) = app_state.operator_message {
         msg.acknowledged = true;
     }
-    
     app_state.operator_message = None;
-    
     app_handle.emit("operator-message-acknowledged", true).map_err(|e| e.to_string())?;
-    
     Ok(())
 }
 
 #[tauri::command]
-async fn get_operator_message(
-    state: tauri::State<'_, SharedState>,
-) -> Result<String, String> {
+async fn get_operator_message(state: tauri::State<'_, SharedState>) -> Result<String, String> {
     let app_state = state.read().await;
     serde_json::to_string(&app_state.operator_message).map_err(|e| e.to_string())
 }
@@ -553,7 +560,11 @@ fn start_ws_server(app_state: SharedState, app_handle: tauri::AppHandle, clients
     tauri::async_runtime::spawn(async move {
         let addr = "0.0.0.0:20777";
         let listener = match TcpListener::bind(addr).await { 
-            Ok(l) => l, Err(e) => { eprintln!("❌ Erro WebSocket: {}", e); return; } 
+            Ok(l) => l, 
+            Err(e) => { 
+                eprintln!("❌ Erro WebSocket: {}", e); 
+                return; 
+            } 
         };
         println!("🟢 WebSocket rodando em ws://{}", addr);
         while let Ok((stream, peer)) = listener.accept().await {
@@ -579,15 +590,12 @@ async fn handle_ws_connection(
             println!("🔗 Tablet conectado: {}", peer);
             let (ws_sender, mut receiver) = ws_stream.split();
             
-            // Criar canal para broadcast
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             clients.add(tx);
             
-            // Precisamos de um Arc<Mutex> para o sender
             let sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
             let sender_clone = sender.clone();
             
-            // Task para enviar mensagens do broadcast para o WebSocket
             let send_task = tauri::async_runtime::spawn(async move {
                 while let Some(msg) = rx.recv().await {
                     let mut s = sender_clone.lock().await;
@@ -609,7 +617,6 @@ async fn handle_ws_connection(
                 let mut s = sender.lock().await;
                 let _ = s.send(Message::Text(msg)).await;
                 
-                // Enviar estado do timer
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -640,7 +647,8 @@ async fn handle_ws_connection(
                             match action {
                                 "set_slide" => {
                                     if let Some(idx) = cmd["index"].as_u64() { 
-                                        st.current_slide_index = idx as usize; st.is_blackout = false;
+                                        st.current_slide_index = idx as usize; 
+                                        st.is_blackout = false;
                                         drop(st);
                                         let _ = switch_to_sistema_internal(&app_handle).await;
                                         st = app_state.write().await;
@@ -699,11 +707,9 @@ async fn handle_ws_connection(
                                             "start_time": st.timer.start_time,
                                         }).to_string();
                                         
-                                        // Enviar de volta para o orador
                                         let mut s = sender.lock().await;
                                         let _ = s.send(Message::Text(timer_msg)).await;
                                         
-                                        // EMITIR PARA O ADMIN
                                         let timer_state = serde_json::json!({
                                             "running": st.timer.running,
                                             "accumulated": current_ms,
@@ -817,20 +823,31 @@ async fn handle_ws_connection(
 
 async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app_handle.get_webview_window("display") {
-        w.unminimize().map_err(|e| e.to_string())?; w.show().map_err(|e| e.to_string())?;
-        w.set_always_on_top(true).map_err(|e| e.to_string())?; w.set_fullscreen(true).map_err(|e| e.to_string())?;
-        w.set_focus().map_err(|e| e.to_string())?; return Ok(());
+        w.unminimize().map_err(|e| e.to_string())?; 
+        w.show().map_err(|e| e.to_string())?;
+        w.set_always_on_top(true).map_err(|e| e.to_string())?; 
+        w.set_fullscreen(true).map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?; 
+        return Ok(());
     }
     let window = WebviewWindowBuilder::new(app_handle, "display", tauri::WebviewUrl::App("/display".into()))
-        .title("Tela de Exibição").inner_size(800.0, 600.0).decorations(false).always_on_top(true).visible(false)
-        .build().map_err(|e| e.to_string())?;
+        .title("Tela de Exibição")
+        .inner_size(800.0, 600.0)
+        .decorations(false)
+        .always_on_top(true)
+        .visible(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    
     if let Ok(monitors) = window.available_monitors() {
         let target = if monitors.len() > 1 { &monitors[1] } else { &monitors[0] };
         window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).map_err(|e| e.to_string())?;
         window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).map_err(|e| e.to_string())?;
     }
-    window.set_always_on_top(true).map_err(|e| e.to_string())?; window.set_fullscreen(true).map_err(|e| e.to_string())?;
-    window.show().map_err(|e| e.to_string())?; window.set_focus().map_err(|e| e.to_string())?;
+    window.set_always_on_top(true).map_err(|e| e.to_string())?; 
+    window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?; 
+    window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -895,53 +912,102 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                 Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"status": "ok"})))
             });
         
+        // NOVO: Servir imagens via HTTP
+        let serve_image = warp::path!("images" / String)
+            .and(warp::get())
+            .and(handle_filter.clone())
+            .and_then(|filename: String, handle: tauri::AppHandle| async move {
+                let app_dir = handle.path().app_data_dir()
+                    .map_err(|_| warp::reject::not_found())?;
+                let image_path = app_dir.join("images").join(&filename);
+                
+                if let Ok(bytes) = fs::read(&image_path) {
+                    let mime = from_path(&image_path).first_or_octet_stream();
+                    Ok::<_, warp::Rejection>(warp::http::Response::builder()
+                        .header("Content-Type", mime.as_ref())
+                        .header("Cache-Control", "public, max-age=3600")
+                        .body(bytes)
+                        .unwrap())
+                } else {
+                    Err(warp::reject::not_found())
+                }
+            });
+        
+        // NOVO: Servir thumbnails via HTTP
+        let serve_thumbnail = warp::path!("thumbnails" / String)
+            .and(warp::get())
+            .and(handle_filter.clone())
+            .and_then(|filename: String, handle: tauri::AppHandle| async move {
+                let app_dir = handle.path().app_data_dir()
+                    .map_err(|_| warp::reject::not_found())?;
+                let thumb_path = app_dir.join("thumbnails").join(&filename);
+                
+                if let Ok(bytes) = fs::read(&thumb_path) {
+                    let mime = from_path(&thumb_path).first_or_octet_stream();
+                    Ok::<_, warp::Rejection>(warp::http::Response::builder()
+                        .header("Content-Type", mime.as_ref())
+                        .header("Cache-Control", "public, max-age=3600")
+                        .body(bytes)
+                        .unwrap())
+                } else {
+                    Err(warp::reject::not_found())
+                }
+            });
+        
         let static_files = warp::any()
-        .and(warp::path::full())
-        .and_then(|path: warp::path::FullPath| async move {
-            let path = path.as_str().trim_start_matches('/');
-            let path = if path.is_empty() { "index.html" } else { path };
-            
-            match StaticAssets::get(path) {
-                Some(content) => {
-                    let mime = from_path(path).first_or_octet_stream();
-                    let bytes: Vec<u8> = content.data.into_owned();
-                    Ok::<_, warp::Rejection>(warp::reply::with_header(
-                        bytes,
-                        "Content-Type",
-                        mime.as_ref(),
-                    ))
-                },
-                None => {
-                    match StaticAssets::get("index.html") {
-                        Some(content) => {
-                            let bytes: Vec<u8> = content.data.into_owned();
-                            Ok(warp::reply::with_header(
-                                bytes,
-                                "Content-Type",
-                                "text/html",
-                            ))
-                        },
-                        None => Err(warp::reject::not_found()),
+            .and(warp::path::full())
+            .and_then(|path: warp::path::FullPath| async move {
+                let path = path.as_str().trim_start_matches('/');
+                let path = if path.is_empty() { "index.html" } else { path };
+                
+                match StaticAssets::get(path) {
+                    Some(content) => {
+                        let mime = from_path(path).first_or_octet_stream();
+                        let bytes: Vec<u8> = content.data.into_owned();
+                        Ok::<_, warp::Rejection>(warp::reply::with_header(
+                            bytes,
+                            "Content-Type",
+                            mime.as_ref(),
+                        ))
+                    },
+                    None => {
+                        match StaticAssets::get("index.html") {
+                            Some(content) => {
+                                let bytes: Vec<u8> = content.data.into_owned();
+                                Ok(warp::reply::with_header(
+                                    bytes,
+                                    "Content-Type",
+                                    "text/html",
+                                ))
+                            },
+                            None => Err(warp::reject::not_found()),
+                        }
                     }
                 }
-            }
-        });                                 
+            });
         
         let cors = warp::cors()
             .allow_any_origin()
             .allow_methods(vec!["GET", "POST"])
             .allow_headers(vec!["Content-Type"]);
         
-        let routes = static_files.or(get_state).or(post_command).with(cors);
+        // Rotas: API primeiro, depois imagens, depois arquivos estáticos
+        let routes = get_state
+            .or(post_command)
+            .or(serve_image)
+            .or(serve_thumbnail)
+            .or(static_files)
+            .with(cors);
         
-        println!("🌐 Servidor HTTP de controle rodando em http://0.0.0.0:20778");
+        println!("🌐 Servidor HTTP rodando em http://0.0.0.0:20778");
         warp::serve(routes).run(([0, 0, 0, 0], 20778)).await;
     });
 }
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = load_state_from_disk(&app.handle());
             let shared_state: SharedState = Arc::new(RwLock::new(state));
@@ -965,5 +1031,6 @@ pub fn run() {
             request_indicator, acknowledge_indicator_request, get_indicator_request,
             send_operator_message, acknowledge_operator_message, get_operator_message
         ])
-        .run(tauri::generate_context!()).expect("erro");
+        .run(tauri::generate_context!())
+        .expect("erro");
 }

@@ -92,11 +92,11 @@ function AdminPage() {
 
   const loadThumb = async (filename: string) => {
     if (thumbCache[filename]) return thumbCache[filename];
-    try {
-      const b64 = await invoke('get_image_base64', { filename, isThumb: true });
-      setThumbCache(prev => ({ ...prev, [filename]: b64 as string }));
-      return b64 as string;
-    } catch (_) { return ''; }
+    
+    // Usar URL HTTP direta em vez de base64
+    const url = `http://localhost:20778/thumbnails/${filename}`;
+    setThumbCache(prev => ({ ...prev, [filename]: url }));
+    return url;
   };
 
   const handleUpload = async () => {
