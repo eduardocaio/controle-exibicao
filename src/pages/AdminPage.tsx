@@ -9,6 +9,7 @@ import {
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
 import Timer from '../components/Timer';
+import CountdownTimer from '../components/CountdownTimer';
 
 interface Presentation {
   id: string;
@@ -301,6 +302,7 @@ function AdminPage() {
           
           <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
             <Timer onControl={handleTimerControl} isOperator={true}/>
+            <CountdownTimer />
             
             {monitors.map((m,i) => (
               <span key={i} style={{ 

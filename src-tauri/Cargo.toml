@@ -28,3 +28,4 @@ mime_guess = "2"
 base64 = "0.21"
 rusqlite = { version = "0.31", features = ["bundled"] }
 zip = "0.6"
+chrono = "0.4"

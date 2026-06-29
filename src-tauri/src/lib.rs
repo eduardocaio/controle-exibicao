@@ -1,6 +1,6 @@
 mod state;
 
-use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage, Presentation};
+use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage, Presentation, ScheduleConfig, MeetingTime};
 use std::fs;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -21,6 +21,7 @@ use image::ImageFormat;
 use image::GenericImageView;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use chrono::Timelike;
 
 // Estrutura para gerenciar conexões WebSocket
 struct WsClients {
@@ -1696,7 +1697,212 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
     Ok(())
 }
 
-// MAIN
+#[tauri::command]
+async fn reorder_slides(
+    presentation_id: String,
+    slide_ids: Vec<String>,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    
+    if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
+        // Reordenar slides baseado na nova ordem de IDs
+        let mut reordered = Vec::new();
+        for (new_order, id) in slide_ids.iter().enumerate() {
+            if let Some(slide) = pres.slides.iter().find(|s| &s.id == id) {
+                let mut slide = slide.clone();
+                slide.order = new_order;
+                reordered.push(slide);
+            }
+        }
+        
+        // Manter slides que não estão na lista (não deveria acontecer, mas por segurança)
+        for slide in &pres.slides {
+            if !slide_ids.contains(&slide.id) {
+                let mut slide = slide.clone();
+                slide.order = reordered.len();
+                reordered.push(slide);
+            }
+        }
+        
+        pres.slides = reordered;
+        
+        // Se esta apresentação é a ativa, notificar tablets
+        if pres.active {
+            let active_slides = get_active_slides(&app_state);
+            let msg = serde_json::json!({
+                "type": "state",
+                "slides": build_slides_json(&active_slides, &app_handle),
+                "current_index": app_state.current_slide_index,
+                "is_blackout": app_state.is_blackout,
+                "active_presentation_id": app_state.active_presentation_id,
+            }).to_string();
+            ws_clients.broadcast(msg);
+        }
+    } else {
+        return Err("Apresentação não encontrada".to_string());
+    }
+    
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+// Adicione estes comandos no lib.rs
+
+#[tauri::command]
+async fn get_schedule_config(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.schedule_config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_schedule_config(
+    config_json: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let config: ScheduleConfig = serde_json::from_str(&config_json).map_err(|e| format!("Erro ao parsear config: {}", e))?;
+    let mut app_state = state.write().await;
+    app_state.schedule_config = config;
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_countdown_state(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.countdown).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_countdown(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    app_state.countdown.running = false;
+    app_state.countdown.seconds_left = 0;
+    app_state.countdown.target_time = None;
+    app_state.countdown.label = String::new();
+    save_state_to_disk(&app_state, &app_handle);
+    
+    app_handle.emit("countdown-stop", ()).map_err(|e| e.to_string())?;
+    
+    drop(app_state);
+    switch_to_jw_library_internal(&app_handle).await?;
+    
+    Ok(())
+}
+
+// Função para iniciar o cronômetro (chamada internamente)
+fn start_countdown_internal(
+    state: &mut AppState,
+    target_time: String,
+    seconds_left: u64,
+    label: String,
+) {
+    state.countdown.running = true;
+    state.countdown.target_time = Some(target_time);
+    state.countdown.seconds_left = seconds_left;
+    state.countdown.label = label;
+}
+
+fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHandle) {
+    let state = app_state.clone();
+    let handle = app_handle.clone();
+    
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            
+            let mut app_state = state.write().await;
+            
+            // Se estiver rodando, decrementar o contador
+            if app_state.countdown.running {
+                if app_state.countdown.seconds_left > 0 {
+                    app_state.countdown.seconds_left -= 1;
+                    
+                    let countdown_json = serde_json::json!({
+                        "running": true,
+                        "target_time": app_state.countdown.target_time,
+                        "seconds_left": app_state.countdown.seconds_left,
+                        "label": app_state.countdown.label,
+                    });
+                    let _ = handle.emit("countdown-update", &countdown_json);
+                    
+                    if app_state.countdown.seconds_left == 0 {
+                        app_state.countdown.running = false;
+                        app_state.countdown.target_time = None;
+                        app_state.countdown.label = String::new();
+                        let _ = handle.emit("countdown-stop", ());
+                        
+                        drop(app_state);
+                        let _ = switch_to_jw_library_internal(&handle).await;
+                        continue;
+                    }
+                }
+                continue;
+            }
+            
+            // Verificar agendamento
+            let now = chrono::Local::now();
+            let current_second = now.second();
+            
+            if current_second % 30 != 0 && current_second != 0 {
+                continue;
+            }
+            
+            let weekday = now.format("%A").to_string().to_lowercase();
+            
+            if let Some(day_config) = app_state.schedule_config.days.iter().find(|d| d.day == weekday) {
+                if !day_config.enabled || day_config.times.is_empty() {
+                    continue;
+                }
+                
+                let current_hour = now.hour();
+                let current_minute = now.minute();
+                let current_seconds_total = (current_hour * 3600 + current_minute * 60 + current_second) as i64;
+                
+                let mut next_meeting: Option<&MeetingTime> = None;
+                let mut min_diff: i64 = i64::MAX;
+                
+                for time in &day_config.times {
+                    let meeting_seconds = (time.hour * 3600 + time.minute * 60) as i64;
+                    let diff = meeting_seconds - current_seconds_total;
+                    
+                    if diff > 0 && diff <= 300 && diff < min_diff {
+                        min_diff = diff;
+                        next_meeting = Some(time);
+                    }
+                }
+                
+                if let Some(meeting) = next_meeting {
+                    let seconds_left = min_diff as u64;
+                    let target = format!("{:02}:{:02}", meeting.hour, meeting.minute);
+                    let label = day_config.label.clone();
+                    
+                    start_countdown_internal(&mut app_state, target.clone(), seconds_left, label.clone());
+                    
+                    let countdown_json = serde_json::json!({
+                        "running": true,
+                        "target_time": target,
+                        "seconds_left": seconds_left,
+                        "label": label,
+                    });
+                    let _ = handle.emit("countdown-update", &countdown_json);
+                    
+                    // ✅ ALTERNAR PARA A TELA DE IMAGENS (SISTEMA)
+                    drop(app_state);
+                    let _ = switch_to_sistema_internal(&handle).await;
+                    // Re-obter o lock após alternar
+                    app_state = state.write().await;
+                }
+            }
+        }
+    });
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -1712,6 +1918,7 @@ pub fn run() {
             state.active_presentation_id = None;
             state.current_slide_index = 0;
             state.is_blackout = true;
+            state.countdown.running = false; // Garantir que começa parado
             
             let shared_state: SharedState = Arc::new(RwLock::new(state));
             let clients = Arc::new(WsClients::new());
@@ -1721,6 +1928,10 @@ pub fn run() {
             
             start_ws_server(shared_state.clone(), app.handle().clone(), clients);
             start_http_control_server(shared_state.clone(), app.handle().clone());
+            
+            // Iniciar verificador de agendamento
+            check_and_start_countdown(&shared_state, &app.handle());
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1735,7 +1946,8 @@ pub fn run() {
             send_operator_message, acknowledge_operator_message, get_operator_message,
             create_presentation, delete_presentation, set_active_presentation,
             upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
-            extract_jw_playlist
+            extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
+            get_countdown_state, stop_countdown,
         ])
         .run(tauri::generate_context!())
         .expect("erro");
