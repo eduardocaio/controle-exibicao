@@ -1,10 +1,10 @@
-// src/pages/AdminPage.tsx
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Upload, Monitor, BookOpen, Trash2, Play, Square, Image } from 'lucide-react';
+import { Upload, Monitor, BookOpen, Trash2, Play, Square, Image, GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle} from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
+import Timer from '../components/Timer';
 
 function AdminPage() {
   const [images, setImages] = useState<any[]>([]);
@@ -15,11 +15,15 @@ function AdminPage() {
   const [activeImageIndex, setActiveImageIndex] = useState<number | null>(null);
   const [isBlackout, setIsBlackout] = useState(true);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [waterAlerts, setWaterAlerts] = useState<any[]>([]);
+  const [indicatorAlert, setIndicatorAlert] = useState<any>(null);
+  const [messageText, setMessageText] = useState('');
+  const [sentMessage, setSentMessage] = useState<any>(null);
+  const [messageAcknowledged, setMessageAcknowledged] = useState(false);
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadImages(); checkDisplayState(); }, []);
 
-  // Polling do estado de exibição
   useEffect(() => {
     const interval = setInterval(checkDisplayState, 500);
     return () => clearInterval(interval);
@@ -31,6 +35,41 @@ function AdminPage() {
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
+
+  useEffect(() => {
+    const unlistenWater = listen('water-request', (event: any) => {
+      setWaterAlerts(prev => [...prev, { ...event.payload, id: event.payload.id }]);
+    });
+    
+    const unlistenIndicator = listen('indicator-request', (event: any) => {
+      setIndicatorAlert(event.payload);
+    });
+
+    const unlistenMessageAck = listen('operator-message-acknowledged', () => {
+        setMessageAcknowledged(true);
+        setSentMessage(null);
+        setTimeout(() => setMessageAcknowledged(false), 5000);
+    });
+    
+    return () => {
+      unlistenWater.then(fn => fn());
+      unlistenIndicator.then(fn => fn());
+      unlistenMessageAck.then(fn => fn());
+    };
+  }, []);
+
+  const handleSendMessage = async () => {
+    if (!messageText.trim()) return;
+    
+    try {
+        await invoke('send_operator_message', { text: messageText.trim() });
+        setSentMessage({ text: messageText.trim() });
+        setMessageText('');
+        setMessageAcknowledged(false);
+    } catch (e) {
+        console.error('Erro ao enviar mensagem:', e);
+    }
+  };
 
   const checkDisplayState = async () => {
     try {
@@ -93,6 +132,24 @@ function AdminPage() {
   const handleSwitchToJW = async () => { await invoke('switch_to_jw_library'); setActiveApp('jw'); };
   const handleSwitchToSistema = async () => { await invoke('switch_to_sistema'); setActiveApp('sistema'); };
 
+  const handleTimerControl = async (action: string) => {
+    try {
+      await invoke('timer_control', { action });
+    } catch (e) {
+      console.error('Erro no timer:', e);
+    }
+  };
+
+  const handleAcknowledgeWater = async (requestId: string) => {
+    await invoke('acknowledge_water_request', { requestId });
+    setWaterAlerts(prev => prev.filter(w => w.id !== requestId));
+  };
+
+  const handleAcknowledgeIndicator = async () => {
+    await invoke('acknowledge_indicator_request');
+    setIndicatorAlert(null);
+  };
+
   useEffect(() => {
     const init = async () => { try { await invoke('show_display_window'); } catch (_) {} };
     init();
@@ -135,6 +192,9 @@ function AdminPage() {
           </div>
           
           <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
+            {/* Timer */}
+            <Timer onControl={handleTimerControl} isOperator={true}/>
+            
             {/* Monitores */}
             {monitors.map((m,i) => (
               <span key={i} style={{ 
@@ -180,6 +240,111 @@ function AdminPage() {
             onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
             title="Configurações">⚙️</button>
           </div>
+        </div>
+
+        {/* Painel de Mensagem para o Orador */}
+        <div style={{ 
+            background: 'linear-gradient(135deg, #111820 0%, #1a1f2e 100%)', 
+            borderRadius: '16px', 
+            padding: '1.25rem 1.5rem', 
+            marginBottom: '1rem',
+            border: '1px solid rgba(147,51,234,0.2)',
+            display: 'flex',
+            gap: '0.75rem',
+            alignItems: 'center',
+        }}>
+            <div style={{
+                width: '40px', height: '40px',
+                borderRadius: '10px',
+                background: 'rgba(147,51,234,0.12)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+            }}>
+                <MessageSquare size={20} color="#a855f7" />
+            </div>
+            
+            <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <input
+                        type="text"
+                        value={messageText}
+                        onChange={(e) => setMessageText(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                        placeholder="Digite uma mensagem para o orador..."
+                        style={{
+                            flex: 1,
+                            padding: '0.65rem 0.85rem',
+                            background: 'rgba(255,255,255,0.03)',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            borderRadius: '8px',
+                            color: '#e1e4e8',
+                            fontSize: '0.85rem',
+                            outline: 'none',
+                        }}
+                    />
+                    <button
+                        onClick={handleSendMessage}
+                        disabled={!messageText.trim()}
+                        style={{
+                            padding: '0.65rem 1rem',
+                            background: messageText.trim() ? '#7c3aed' : 'rgba(124,58,237,0.3)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: '8px',
+                            cursor: messageText.trim() ? 'pointer' : 'not-allowed',
+                            fontWeight: 600,
+                            fontSize: '0.82rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            transition: 'all 0.15s',
+                            opacity: messageText.trim() ? 1 : 0.5,
+                        }}
+                    >
+                        <Send size={14} />
+                        Enviar
+                    </button>
+                </div>
+                
+                {sentMessage && !messageAcknowledged && (
+                    <div style={{
+                        marginTop: '0.5rem',
+                        padding: '0.4rem 0.75rem',
+                        background: 'rgba(147,51,234,0.08)',
+                        borderRadius: '6px',
+                        fontSize: '0.75rem',
+                        color: '#a855f7',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                    }}>
+                        <div style={{
+                            width: '6px', height: '6px',
+                            borderRadius: '50%',
+                            backgroundColor: '#a855f7',
+                            animation: 'pulse 1.5s infinite',
+                        }} />
+                        Mensagem enviada: "{sentMessage.text}" - Aguardando confirmação...
+                    </div>
+                )}
+                
+                {messageAcknowledged && (
+                    <div style={{
+                        marginTop: '0.5rem',
+                        padding: '0.4rem 0.75rem',
+                        background: 'rgba(52,211,153,0.08)',
+                        borderRadius: '6px',
+                        fontSize: '0.75rem',
+                        color: '#34d399',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                    }}>
+                        <CheckCircle size={14} />
+                        Orador confirmou o recebimento da mensagem
+                    </div>
+                )}
+            </div>
         </div>
 
         {/* Conteúdo */}
@@ -254,6 +419,175 @@ function AdminPage() {
           )}
         </div>
       </div>
+
+      {/* Alertas */}
+      {(waterAlerts.length > 0 || indicatorAlert) && (
+        <div style={{
+          position: 'fixed',
+          bottom: '80px',
+          right: '2rem',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.75rem',
+          zIndex: 1000,
+          maxWidth: '380px',
+        }}>
+          {waterAlerts.filter(w => !w.acknowledged).map((alert) => (
+            <div key={alert.id} style={{
+              background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+              border: '1px solid rgba(59,130,246,0.3)',
+              borderRadius: '14px',
+              padding: '1rem 1.25rem',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.4), 0 0 0 1px rgba(59,130,246,0.1)',
+              animation: 'slideInRight 0.3s ease',
+              backdropFilter: 'blur(10px)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                <div style={{
+                  width: '40px', height: '40px',
+                  borderRadius: '10px',
+                  background: 'rgba(59,130,246,0.12)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  <GlassWater size={20} color="#3b82f6" />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: '#e2e8f0' }}>
+                      Pedido de Água
+                    </h4>
+                    <button
+                      onClick={() => handleAcknowledgeWater(alert.id)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#64748b',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        borderRadius: '4px',
+                        display: 'flex',
+                      }}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <p style={{ margin: '0.25rem 0 0.75rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+                    Orador solicitou água
+                  </p>
+                  <button
+                    onClick={() => handleAcknowledgeWater(alert.id)}
+                    style={{
+                      width: '100%',
+                      padding: '0.5rem',
+                      background: 'rgba(59,130,246,0.15)',
+                      color: '#60a5fa',
+                      border: '1px solid rgba(59,130,246,0.25)',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.background = 'rgba(59,130,246,0.25)';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.background = 'rgba(59,130,246,0.15)';
+                    }}
+                  >
+                    OK - Entregue
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {indicatorAlert && (
+            <div style={{
+              background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+              border: '1px solid rgba(245,158,11,0.3)',
+              borderRadius: '14px',
+              padding: '1rem 1.25rem',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.4), 0 0 0 1px rgba(245,158,11,0.1)',
+              animation: 'slideInRight 0.3s ease',
+              backdropFilter: 'blur(10px)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                <div style={{
+                  width: '40px', height: '40px',
+                  borderRadius: '10px',
+                  background: 'rgba(245,158,11,0.12)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  <AlertTriangle size={20} color="#f59e0b" />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: '#e2e8f0' }}>
+                      Pedido de Indicador
+                    </h4>
+                    <button
+                      onClick={handleAcknowledgeIndicator}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#64748b',
+                        cursor: 'pointer',
+                        padding: '2px',
+                        borderRadius: '4px',
+                        display: 'flex',
+                      }}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <p style={{ margin: '0.25rem 0 0.75rem', fontSize: '0.75rem', color: '#94a3b8' }}>
+                    Orador solicitou um indicador
+                  </p>
+                  <button
+                    onClick={handleAcknowledgeIndicator}
+                    style={{
+                      width: '100%',
+                      padding: '0.5rem',
+                      background: 'rgba(245,158,11,0.15)',
+                      color: '#fbbf24',
+                      border: '1px solid rgba(245,158,11,0.25)',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.background = 'rgba(245,158,11,0.25)';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.background = 'rgba(245,158,11,0.15)';
+                    }}
+                  >
+                    OK - Providenciar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes slideInRight {
+          from {
+            transform: translateX(100%);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
+        }
+      `}</style>
     </div>
   );
 }
@@ -299,7 +633,6 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
           </div>
         )}
         
-        {/* Overlay hover */}
         {isHovered && !isActive && (
           <div style={{
             position:'absolute', top:0, left:0, right:0, bottom:0,
@@ -316,7 +649,6 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
           </div>
         )}
 
-        {/* Overlay ativo */}
         {isActive && (
           <div style={{
             position:'absolute', top:0, left:0, right:0, bottom:0,

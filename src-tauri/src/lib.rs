@@ -1,12 +1,11 @@
-// src-tauri/src/lib.rs
-
 mod state;
 
-use state::{AppState, SharedState, Slide};
+use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tauri::Manager;
 use tauri::Emitter;
@@ -17,6 +16,42 @@ use futures_util::{StreamExt, SinkExt};
 use warp::Filter;
 use rust_embed::RustEmbed;
 use mime_guess::from_path;
+
+// Estrutura para gerenciar conexões WebSocket
+struct WsClients {
+    senders: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<String>>>,
+}
+
+impl WsClients {
+    fn new() -> Self {
+        Self {
+            senders: Mutex::new(Vec::new()),
+        }
+    }
+    
+    fn broadcast(&self, msg: String) {
+        if let Ok(senders) = self.senders.lock() {
+            // Limpar senders que foram desconectados
+            let mut active_senders = Vec::new();
+            for sender in senders.iter() {
+                if sender.send(msg.clone()).is_ok() {
+                    active_senders.push(sender.clone());
+                }
+            }
+            // Não podemos modificar o Vec enquanto iteramos, então fazemos depois
+            drop(senders);
+            if let Ok(mut senders) = self.senders.lock() {
+                *senders = active_senders;
+            }
+        }
+    }
+    
+    fn add(&self, sender: tokio::sync::mpsc::UnboundedSender<String>) {
+        if let Ok(mut senders) = self.senders.lock() {
+            senders.push(sender);
+        }
+    }
+}
 
 fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -101,8 +136,13 @@ async fn upload_images_direct(
         let dest_path = images_dir.join(&new_filename);
         fs::copy(&original_path, &dest_path).map_err(|e| e.to_string())?;
         let thumb_path = thumbs_dir.join(&new_filename);
-        if let Ok(img) = image::open(&dest_path) { let _ = img.thumbnail(200, 150).save(&thumb_path); }
-        else { let _ = fs::copy(&dest_path, &thumb_path); }
+        if let Ok(img) = image::open(&dest_path) {
+            let thumb = img.resize(400, 300, image::imageops::FilterType::Lanczos3);
+            // Salvar com qualidade JPEG 85% (bom equilíbrio qualidade/tamanho)
+            let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+        } else {
+            let _ = fs::copy(&dest_path, &thumb_path); 
+        }
         new_slides.push((uuid::Uuid::new_v4().to_string(), new_filename));
     }
     
@@ -235,14 +275,263 @@ async fn reset_texto_do_ano(app_handle: tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
-async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    // ESCONDE/MINIMIZA a janela display primeiro
-    if let Some(w) = app_handle.get_webview_window("display") {
-        w.set_always_on_top(false).ok();
-        w.hide().ok(); // ← Alternativa: esconder completamente
+// ===== NOVAS FUNCIONALIDADES =====
+
+#[tauri::command]
+async fn timer_control(
+    action: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<String, String> {
+    let mut app_state = state.write().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    
+    match action.as_str() {
+        "start" => {
+            if !app_state.timer.running {
+                app_state.timer.running = true;
+                app_state.timer.start_time = now;
+            }
+        }
+        "pause" => {
+            if app_state.timer.running {
+                app_state.timer.running = false;
+                app_state.timer.accumulated += now - app_state.timer.start_time;
+            }
+        }
+        "reset" => {
+            app_state.timer.running = false;
+            app_state.timer.accumulated = 0;
+            app_state.timer.start_time = 0;
+        }
+        _ => return Err("Ação inválida".to_string()),
     }
     
-    // PowerShell para focar JW Library
+    let current_ms = if app_state.timer.running {
+        app_state.timer.accumulated + (now - app_state.timer.start_time)
+    } else {
+        app_state.timer.accumulated
+    };
+    
+    let timer_state = serde_json::json!({
+        "running": app_state.timer.running,
+        "accumulated": current_ms,
+        "start_time": app_state.timer.start_time,
+    });
+    
+    // Emitir para o Admin (evento Tauri)
+    app_handle.emit("timer-update", &timer_state).map_err(|e| e.to_string())?;
+    
+    // Broadcast para todos os Oradores conectados via WebSocket
+    let ws_msg = serde_json::json!({
+        "type": "timer_state",
+        "running": app_state.timer.running,
+        "accumulated": current_ms,
+        "start_time": app_state.timer.start_time,
+    }).to_string();
+    ws_clients.broadcast(ws_msg);
+    
+    Ok(timer_state.to_string())
+}
+
+#[tauri::command]
+async fn get_timer_state(
+    state: tauri::State<'_, SharedState>,
+) -> Result<String, String> {
+    let app_state = state.read().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    
+    let current_ms = if app_state.timer.running {
+        app_state.timer.accumulated + (now - app_state.timer.start_time)
+    } else {
+        app_state.timer.accumulated
+    };
+    
+    let timer_state = serde_json::json!({
+        "running": app_state.timer.running,
+        "accumulated": current_ms,
+        "start_time": app_state.timer.start_time,
+    });
+    
+    Ok(timer_state.to_string())
+}
+
+#[tauri::command]
+async fn request_water(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    
+    let request = WaterRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: now,
+        acknowledged: false,
+    };
+    
+    app_state.water_requests.push(request.clone());
+    
+    app_handle.emit("water-request", &request).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn acknowledge_water_request(
+    request_id: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    if let Some(req) = app_state.water_requests.iter_mut().find(|r| r.id == request_id) {
+        req.acknowledged = true;
+    }
+    
+    app_handle.emit("water-request-acknowledged", &request_id).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_water_requests(
+    state: tauri::State<'_, SharedState>,
+) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.water_requests).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn request_indicator(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    
+    if let Some(ref req) = app_state.indicator_request {
+        if !req.acknowledged {
+            return Err("Já existe um pedido de indicador pendente".to_string());
+        }
+    }
+    
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    
+    let request = IndicatorRequest {
+        timestamp: now,
+        acknowledged: false,
+    };
+    
+    app_state.indicator_request = Some(request.clone());
+    
+    app_handle.emit("indicator-request", &request).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn acknowledge_indicator_request(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    if let Some(ref mut req) = app_state.indicator_request {
+        req.acknowledged = true;
+    }
+    
+    app_handle.emit("indicator-request-acknowledged", true).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_indicator_request(
+    state: tauri::State<'_, SharedState>,
+) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.indicator_request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn send_operator_message(
+    text: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    
+    let message = OperatorMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        text: text.clone(),
+        timestamp: now,
+        acknowledged: false,
+    };
+    
+    app_state.operator_message = Some(message.clone());
+    
+    // Emitir para o Admin
+    app_handle.emit("operator-message-sent", &message).map_err(|e| e.to_string())?;
+    
+    // Enviar para o Orador via WebSocket
+    let ws_msg = serde_json::json!({
+        "type": "operator_message",
+        "id": message.id,
+        "text": message.text,
+        "timestamp": message.timestamp,
+    }).to_string();
+    ws_clients.broadcast(ws_msg);
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn acknowledge_operator_message(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut app_state = state.write().await;
+    if let Some(ref mut msg) = app_state.operator_message {
+        msg.acknowledged = true;
+    }
+    
+    app_state.operator_message = None;
+    
+    app_handle.emit("operator-message-acknowledged", true).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_operator_message(
+    state: tauri::State<'_, SharedState>,
+) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.operator_message).map_err(|e| e.to_string())
+}
+
+async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app_handle.get_webview_window("display") {
+        w.set_always_on_top(false).ok();
+        w.hide().ok();
+    }
+    
     std::process::Command::new("powershell")
         .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
             "$wshell = New-Object -ComObject WScript.Shell;",
@@ -260,7 +549,7 @@ async fn switch_to_sistema_internal(app_handle: &tauri::AppHandle) -> Result<(),
     Ok(())
 }
 
-fn start_ws_server(app_state: SharedState, app_handle: tauri::AppHandle) {
+fn start_ws_server(app_state: SharedState, app_handle: tauri::AppHandle, clients: Arc<WsClients>) {
     tauri::async_runtime::spawn(async move {
         let addr = "0.0.0.0:20777";
         let listener = match TcpListener::bind(addr).await { 
@@ -270,22 +559,75 @@ fn start_ws_server(app_state: SharedState, app_handle: tauri::AppHandle) {
         while let Ok((stream, peer)) = listener.accept().await {
             let state = app_state.clone();
             let handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move { handle_ws_connection(stream, peer, state, handle).await; });
+            let clients = clients.clone();
+            tauri::async_runtime::spawn(async move { 
+                handle_ws_connection(stream, peer, state, handle, clients).await; 
+            });
         }
     });
 }
 
-async fn handle_ws_connection(stream: tokio::net::TcpStream, peer: SocketAddr, app_state: SharedState, app_handle: tauri::AppHandle) {
+async fn handle_ws_connection(
+    stream: tokio::net::TcpStream, 
+    peer: SocketAddr, 
+    app_state: SharedState, 
+    app_handle: tauri::AppHandle,
+    clients: Arc<WsClients>,
+) {
     match tokio_tungstenite::accept_async(stream).await {
         Ok(ws_stream) => {
             println!("🔗 Tablet conectado: {}", peer);
-            let (mut sender, mut receiver) = ws_stream.split();
+            let (ws_sender, mut receiver) = ws_stream.split();
+            
+            // Criar canal para broadcast
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            clients.add(tx);
+            
+            // Precisamos de um Arc<Mutex> para o sender
+            let sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
+            let sender_clone = sender.clone();
+            
+            // Task para enviar mensagens do broadcast para o WebSocket
+            let send_task = tauri::async_runtime::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    let mut s = sender_clone.lock().await;
+                    if s.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+            });
 
             {
                 let state = app_state.read().await;
                 let slides = build_slides_json(&state.slides, &app_handle);
-                let msg = serde_json::json!({ "type": "state", "slides": slides, "current_index": state.current_slide_index, "is_blackout": state.is_blackout }).to_string();
-                let _ = sender.send(Message::Text(msg)).await;
+                let msg = serde_json::json!({ 
+                    "type": "state", 
+                    "slides": slides, 
+                    "current_index": state.current_slide_index, 
+                    "is_blackout": state.is_blackout 
+                }).to_string();
+                let mut s = sender.lock().await;
+                let _ = s.send(Message::Text(msg)).await;
+                
+                // Enviar estado do timer
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                let current_ms = if state.timer.running {
+                    state.timer.accumulated + (now - state.timer.start_time)
+                } else {
+                    state.timer.accumulated
+                };
+                
+                let timer_msg = serde_json::json!({
+                    "type": "timer_state",
+                    "running": state.timer.running,
+                    "accumulated": current_ms,
+                    "start_time": state.timer.start_time,
+                }).to_string();
+                let _ = s.send(Message::Text(timer_msg)).await;
             }
 
             while let Some(msg_result) = receiver.next().await {
@@ -316,23 +658,157 @@ async fn handle_ws_connection(stream: tokio::net::TcpStream, peer: SocketAddr, a
                                     let _ = switch_to_sistema_internal(&app_handle).await;
                                     st = app_state.write().await;
                                 },
+                                "timer_control" => {
+                                    if let Some(timer_action) = cmd["timer_action"].as_str() {
+                                        let now = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis() as u64;
+                                        
+                                        match timer_action {
+                                            "start" => {
+                                                if !st.timer.running {
+                                                    st.timer.running = true;
+                                                    st.timer.start_time = now;
+                                                }
+                                            }
+                                            "pause" => {
+                                                if st.timer.running {
+                                                    st.timer.running = false;
+                                                    st.timer.accumulated += now - st.timer.start_time;
+                                                }
+                                            }
+                                            "reset" => {
+                                                st.timer.running = false;
+                                                st.timer.accumulated = 0;
+                                                st.timer.start_time = 0;
+                                            }
+                                            _ => {}
+                                        }
+                                        
+                                        let current_ms = if st.timer.running {
+                                            st.timer.accumulated + (now - st.timer.start_time)
+                                        } else {
+                                            st.timer.accumulated
+                                        };
+                                        
+                                        let timer_msg = serde_json::json!({
+                                            "type": "timer_state",
+                                            "running": st.timer.running,
+                                            "accumulated": current_ms,
+                                            "start_time": st.timer.start_time,
+                                        }).to_string();
+                                        
+                                        // Enviar de volta para o orador
+                                        let mut s = sender.lock().await;
+                                        let _ = s.send(Message::Text(timer_msg)).await;
+                                        
+                                        // EMITIR PARA O ADMIN
+                                        let timer_state = serde_json::json!({
+                                            "running": st.timer.running,
+                                            "accumulated": current_ms,
+                                            "start_time": st.timer.start_time,
+                                        });
+                                        drop(st);
+                                        app_handle.emit("timer-update", &timer_state).ok();
+                                        st = app_state.write().await;
+                                    }
+                                }
+                                "request_water" => {
+                                    let now = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    
+                                    let request = WaterRequest {
+                                        id: uuid::Uuid::new_v4().to_string(),
+                                        timestamp: now,
+                                        acknowledged: false,
+                                    };
+                                    
+                                    st.water_requests.push(request.clone());
+                                    
+                                    let mut s = sender.lock().await;
+                                    let _ = s.send(Message::Text(serde_json::json!({
+                                        "type": "water_request_sent"
+                                    }).to_string())).await;
+                                    
+                                    drop(st);
+                                    app_handle.emit("water-request", &request).ok();
+                                    st = app_state.write().await;
+                                }
+                                "request_indicator" => {
+                                    if st.indicator_request.as_ref().map_or(true, |r| r.acknowledged) {
+                                        let now = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs();
+                                        
+                                        let request = IndicatorRequest {
+                                            timestamp: now,
+                                            acknowledged: false,
+                                        };
+                                        
+                                        st.indicator_request = Some(request.clone());
+                                        
+                                        let mut s = sender.lock().await;
+                                        let _ = s.send(Message::Text(serde_json::json!({
+                                            "type": "indicator_request_sent"
+                                        }).to_string())).await;
+                                        
+                                        drop(st);
+                                        app_handle.emit("indicator-request", &request).ok();
+                                        st = app_state.write().await;
+                                    } else {
+                                        let mut s = sender.lock().await;
+                                        let _ = s.send(Message::Text(serde_json::json!({
+                                            "type": "indicator_request_pending"
+                                        }).to_string())).await;
+                                    }
+                                }
+                                "acknowledge_message" => {
+                                    if let Some(ref mut msg) = st.operator_message {
+                                        msg.acknowledged = true;
+                                        
+                                        let mut s = sender.lock().await;
+                                        let _ = s.send(Message::Text(serde_json::json!({
+                                            "type": "message_acknowledged"
+                                        }).to_string())).await;
+                                        
+                                        drop(st);
+                                        app_handle.emit("operator-message-acknowledged", true).ok();
+                                        st = app_state.write().await;
+                                        st.operator_message = None;
+                                    }
+                                }
                                 "refresh" => {},
                                 _ => {}
                             }
 
                             let response = {
                                 let slides = build_slides_json(&st.slides, &app_handle);
-                                serde_json::json!({ "type": "state", "slides": slides, "current_index": st.current_slide_index, "is_blackout": st.is_blackout }).to_string()
+                                serde_json::json!({ 
+                                    "type": "state", 
+                                    "slides": slides, 
+                                    "current_index": st.current_slide_index, 
+                                    "is_blackout": st.is_blackout 
+                                }).to_string()
                             };
-                            let _ = sender.send(Message::Text(response)).await;
+                            let mut s = sender.lock().await;
+                            let _ = s.send(Message::Text(response)).await;
                         }
                     },
                     Ok(Message::Close(_)) => break,
-                    Ok(Message::Ping(data)) => { let _ = sender.send(Message::Pong(data)).await; },
+                    Ok(Message::Ping(data)) => { 
+                        let mut s = sender.lock().await;
+                        let _ = s.send(Message::Pong(data)).await; 
+                    },
                     Err(_) => break,
                     _ => {}
                 }
             }
+            
+            send_task.abort();
             println!("🔴 Tablet desconectado: {}", peer);
         },
         Err(e) => { eprintln!("❌ Erro ao aceitar: {}", e); }
@@ -419,7 +895,6 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                 Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"status": "ok"})))
             });
         
-        // Servir arquivos estáticos do binário
         let static_files = warp::any()
         .and(warp::path::full())
         .and_then(|path: warp::path::FullPath| async move {
@@ -437,7 +912,6 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                     ))
                 },
                 None => {
-                    // Fallback para index.html (SPA)
                     match StaticAssets::get("index.html") {
                         Some(content) => {
                             let bytes: Vec<u8> = content.data.into_owned();
@@ -471,8 +945,12 @@ pub fn run() {
         .setup(|app| {
             let state = load_state_from_disk(&app.handle());
             let shared_state: SharedState = Arc::new(RwLock::new(state));
+            let clients = Arc::new(WsClients::new());
+            
             app.manage(shared_state.clone());
-            start_ws_server(shared_state.clone(), app.handle().clone());
+            app.manage(clients.clone());
+            
+            start_ws_server(shared_state.clone(), app.handle().clone(), clients);
             start_http_control_server(shared_state.clone(), app.handle().clone());
             Ok(())
         })
@@ -481,7 +959,11 @@ pub fn run() {
             delete_slide, get_image_base64, get_default_image, set_current_slide,
             set_blackout, get_display_state, show_display_window,
             switch_to_jw_library, switch_to_sistema, get_monitors,
-            set_texto_do_ano, get_texto_do_ano_path, reset_texto_do_ano
+            set_texto_do_ano, get_texto_do_ano_path, reset_texto_do_ano,
+            timer_control, get_timer_state,
+            request_water, acknowledge_water_request, get_water_requests,
+            request_indicator, acknowledge_indicator_request, get_indicator_request,
+            send_operator_message, acknowledge_operator_message, get_operator_message
         ])
         .run(tauri::generate_context!()).expect("erro");
 }

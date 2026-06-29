@@ -10,8 +10,29 @@ pub struct Slide {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerState {
     pub running: bool,
-    pub start_time: u64,      // timestamp quando iniciou (ms)
-    pub accumulated: u64,     // tempo acumulado antes de pausar (ms)
+    pub start_time: u64,
+    pub accumulated: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaterRequest {
+    pub id: String,
+    pub timestamp: u64,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorRequest {
+    pub timestamp: u64,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorMessage {
+    pub id: String,
+    pub text: String,
+    pub timestamp: u64,
+    pub acknowledged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,8 +41,9 @@ pub struct AppState {
     pub current_slide_index: usize,
     pub is_blackout: bool,
     pub timer: TimerState,
-    pub alert_water: bool,
-    pub alert_indicator: bool,
+    pub water_requests: Vec<WaterRequest>,
+    pub indicator_request: Option<IndicatorRequest>,
+    pub operator_message: Option<OperatorMessage>,
 }
 
 impl AppState {
@@ -35,8 +57,9 @@ impl AppState {
                 start_time: 0,
                 accumulated: 0,
             },
-            alert_water: false,
-            alert_indicator: false,
+            water_requests: Vec::new(),
+            indicator_request: None,
+            operator_message: None,
         }
     }
 }
