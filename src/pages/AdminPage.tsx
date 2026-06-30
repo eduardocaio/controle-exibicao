@@ -21,7 +21,7 @@ interface Presentation {
 function AdminPage() {
   const [presentations, setPresentations] = useState<Presentation[]>([]);
   const [monitors, setMonitors] = useState<string[]>([]);
-  const [activeApp, setActiveApp] = useState<'sistema' | 'jw'>('sistema');
+  const [activeApp, setActiveApp] = useState<'sistema' | 'jw'>('jw');
   const [showSettings, setShowSettings] = useState(false);
   const [thumbCache, setThumbCache] = useState<Record<string, string>>({});
   const [activeImageIndex, setActiveImageIndex] = useState<number | null>(null);
@@ -248,8 +248,12 @@ function AdminPage() {
   };
 
   useEffect(() => {
-    const init = async () => { try { await invoke('show_display_window'); } catch (_) {} };
-    init();
+      const init = async () => { 
+        try { 
+          await invoke('ensure_display_window'); 
+        } catch (_) {} 
+      };
+      init();
   }, []);
 
   if (showSettings) {

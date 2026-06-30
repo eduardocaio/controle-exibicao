@@ -1904,6 +1904,28 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
     });
 }
 
+#[tauri::command]
+async fn ensure_display_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    // Apenas cria a janela se não existir, mas não a mostra
+    if app_handle.get_webview_window("display").is_none() {
+        let window = WebviewWindowBuilder::new(&app_handle, "display", tauri::WebviewUrl::App("/display".into()))
+            .title("Tela de Exibição")
+            .inner_size(800.0, 600.0)
+            .decorations(false)
+            .always_on_top(true)
+            .visible(false)
+            .build()
+            .map_err(|e| e.to_string())?;
+        
+        if let Ok(monitors) = window.available_monitors() {
+            let target = if monitors.len() > 1 { &monitors[1] } else { &monitors[0] };
+            window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).ok();
+            window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).ok();
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1918,7 +1940,7 @@ pub fn run() {
             state.active_presentation_id = None;
             state.current_slide_index = 0;
             state.is_blackout = true;
-            state.countdown.running = false; // Garantir que começa parado
+            state.countdown.running = false;
             
             let shared_state: SharedState = Arc::new(RwLock::new(state));
             let clients = Arc::new(WsClients::new());
@@ -1929,8 +1951,32 @@ pub fn run() {
             start_ws_server(shared_state.clone(), app.handle().clone(), clients);
             start_http_control_server(shared_state.clone(), app.handle().clone());
             
-            // Iniciar verificador de agendamento
             check_and_start_countdown(&shared_state, &app.handle());
+            
+            // ✅ INICIAR NO JW LIBRARY - Emite apenas o evento de switch
+            // O AdminPage vai escutar e atualizar o estado visual
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Aguardar um pouco para o frontend carregar
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                
+                // Emitir evento para o frontend saber que está no JW
+                let _ = handle.emit("switch-app", "jw");
+                
+                // Também ativar o JW Library via PowerShell
+                std::process::Command::new("powershell")
+                    .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
+                        "$wshell = New-Object -ComObject WScript.Shell;",
+                        "$wshell.AppActivate('JW Library');"
+                    ])
+                    .spawn().ok();
+                
+                // Esconder a janela display se já existir
+                if let Some(w) = handle.get_webview_window("display") {
+                    w.set_always_on_top(false).ok();
+                    w.hide().ok();
+                }
+            });
             
             Ok(())
         })
@@ -1947,7 +1993,7 @@ pub fn run() {
             create_presentation, delete_presentation, set_active_presentation,
             upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
             extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
-            get_countdown_state, stop_countdown,
+            get_countdown_state, stop_countdown, ensure_display_window,
         ])
         .run(tauri::generate_context!())
         .expect("erro");
