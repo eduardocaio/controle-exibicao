@@ -4,7 +4,8 @@ import { listen } from '@tauri-apps/api/event';
 import { 
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
-  FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive
+  FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive,
+  QrCode
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
@@ -36,6 +37,8 @@ function AdminPage() {
   const [expandedPresentation, setExpandedPresentation] = useState<string | null>(null);
   const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [qrUrl, setQrUrl] = useState('');
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
@@ -43,6 +46,14 @@ function AdminPage() {
   useEffect(() => {
     const interval = setInterval(checkDisplayState, 500);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen('tablet-upload-complete', () => {
+      loadPresentations();
+      alert('📱 O orador enviou imagens! Uma nova apresentação foi criada.');
+    });
+    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   useEffect(() => {
@@ -82,6 +93,16 @@ function AdminPage() {
       const active = parsed.find((p: Presentation) => p.active);
       setActivePresentationId(active?.id || null);
     } catch (_) {}
+  };
+
+  const handleGenerateQrCode = async () => {
+    try {
+      const url = await invoke('generate_upload_qr') as string;
+      setQrUrl(url);
+      setShowQrModal(true);
+    } catch (e) {
+      alert('Erro ao gerar QR Code');
+    }
   };
 
   const checkDisplayState = async () => {
@@ -268,7 +289,7 @@ function AdminPage() {
         <div style={{ 
           background:'#111820', 
           borderRadius:'16px', 
-          padding:'1.5rem 2rem', 
+          padding:'1.25rem 1.5rem', 
           marginBottom:'1.5rem', 
           display:'flex', 
           justifyContent:'space-between', 
@@ -279,16 +300,17 @@ function AdminPage() {
         }}>
           <div style={{ display:'flex', alignItems:'center', gap:'1rem' }}>
             <div style={{ 
-              width:'44px', height:'44px', 
-              borderRadius:'12px', 
-              background:'rgba(102,126,234,0.12)', 
-              display:'flex', alignItems:'center', justifyContent:'center' 
+              width:'48px', height:'48px', 
+              borderRadius:'14px', 
+              background:'linear-gradient(135deg, rgba(102,126,234,0.2) 0%, rgba(102,126,234,0.1) 100%)', 
+              display:'flex', alignItems:'center', justifyContent:'center',
+              border:'1px solid rgba(102,126,234,0.2)'
             }}>
-              <Image size={22} color="#667eea" />
+              <Image size={24} color="#667eea" />
             </div>
             <div>
-              <h1 style={{ fontSize:'1.4rem', fontWeight:700, margin:0, color:'#e1e4e8', letterSpacing:'-0.3px' }}>Controle de Exibição</h1>
-              <p style={{ opacity:0.5, margin:0, fontSize:'0.8rem', color:'#8b949e' }}>
+              <h1 style={{ fontSize:'1.5rem', fontWeight:700, margin:0, color:'#e1e4e8', letterSpacing:'-0.3px' }}>Controle de Exibição</h1>
+              <p style={{ opacity:0.6, margin:0, fontSize:'0.8rem', color:'#8b949e' }}>
                 {activePresentationId ? (
                   <span style={{ color: '#34d399', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                     <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#34d399' }} />
@@ -304,52 +326,82 @@ function AdminPage() {
             </div>
           </div>
           
-          <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
-            <Timer onControl={handleTimerControl} isOperator={true}/>
-            <CountdownTimer />
+          <div style={{ display:'flex', alignItems:'center', gap:'1rem', flexWrap:'wrap' }}>
+            {/* Timer maior e mais destacado */}
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(102,126,234,0.08) 0%, rgba(102,126,234,0.03) 100%)',
+              borderRadius: '12px',
+              padding: '0.5rem 1rem',
+              border: '1px solid rgba(102,126,234,0.15)',
+            }}>
+              <Timer onControl={handleTimerControl} isOperator={true} size="large" />
+            </div>
             
-            {monitors.map((m,i) => (
-              <span key={i} style={{ 
-                padding:'0.35rem 0.7rem', borderRadius:'20px', fontSize:'0.75rem',
-                background: i===1?'rgba(52,211,153,0.1)':'rgba(255,255,255,0.04)',
-                color: i===1?'#34d399':'#8b949e',
-                border: i===1?'1px solid rgba(52,211,153,0.2)':'1px solid rgba(255,255,255,0.05)',
-                display:'flex', alignItems:'center', gap:'0.4rem'
-              }}>
-                <Monitor size={12} /> {m}
-              </span>
-            ))}
+            {/* Contagem regressiva */}
+            <div style={{
+              background: 'rgba(245,158,11,0.05)',
+              borderRadius: '12px',
+              padding: '0.5rem',
+              border: '1px solid rgba(245,158,11,0.1)',
+            }}>
+              <CountdownTimer />
+            </div>
+            
+            <div style={{ display:'flex', alignItems:'center', gap:'0.5rem' }}>
+              {monitors.map((m,i) => (
+                <span key={i} style={{ 
+                  padding:'0.4rem 0.8rem', borderRadius:'20px', fontSize:'0.75rem',
+                  background: i===1?'rgba(52,211,153,0.1)':'rgba(255,255,255,0.04)',
+                  color: i===1?'#34d399':'#8b949e',
+                  border: i===1?'1px solid rgba(52,211,153,0.2)':'1px solid rgba(255,255,255,0.05)',
+                  display:'flex', alignItems:'center', gap:'0.4rem'
+                }}>
+                  <Monitor size={12} /> {m}
+                </span>
+              ))}
+            </div>
 
             <div style={{ display:'flex', background:'rgba(255,255,255,0.03)', borderRadius:'8px', padding:'3px' }}>
               <button onClick={handleSwitchToJW} style={{
-                padding:'0.4rem 0.8rem', borderRadius:'6px', border:'none', cursor:'pointer',
-                fontWeight:600, fontSize:'0.78rem',
+                padding:'0.5rem 1rem', borderRadius:'6px', border:'none', cursor:'pointer',
+                fontWeight:600, fontSize:'0.8rem',
                 background: activeApp === 'jw' ? '#667eea' : 'transparent',
                 color: activeApp === 'jw' ? '#fff' : '#8b949e',
-                display:'flex', alignItems:'center', gap:'0.3rem', transition:'all 0.15s'
+                display:'flex', alignItems:'center', gap:'0.4rem', transition:'all 0.15s'
               }}>
-                <BookOpen size={13} /> JW Library
+                <BookOpen size={14} /> JW Library
               </button>
               <button onClick={handleSwitchToSistema} style={{
-                padding:'0.4rem 0.8rem', borderRadius:'6px', border:'none', cursor:'pointer',
-                fontWeight:600, fontSize:'0.78rem',
+                padding:'0.5rem 1rem', borderRadius:'6px', border:'none', cursor:'pointer',
+                fontWeight:600, fontSize:'0.8rem',
                 background: activeApp === 'sistema' ? '#667eea' : 'transparent',
                 color: activeApp === 'sistema' ? '#fff' : '#8b949e',
-                display:'flex', alignItems:'center', gap:'0.3rem', transition:'all 0.15s'
+                display:'flex', alignItems:'center', gap:'0.4rem', transition:'all 0.15s'
               }}>
-                <Image size={13} /> Imagens
+                <Image size={14} /> Imagens
               </button>
             </div>
 
             <button onClick={() => setShowSettings(true)} style={{ 
-              width:'38px', height:'38px', borderRadius:'10px', 
+              width:'40px', height:'40px', borderRadius:'10px', 
               background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.06)', 
-              cursor:'pointer', color:'#8b949e', fontSize:'1rem', display:'flex', alignItems:'center', justifyContent:'center',
+              cursor:'pointer', color:'#8b949e', display:'flex', alignItems:'center', justifyContent:'center',
               transition:'all 0.15s'
             }}
-            onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
-            title="Configurações">⚙️</button>
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
+              e.currentTarget.style.color = '#e1e4e8';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              e.currentTarget.style.color = '#8b949e';
+            }}
+            title="Configurações">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -529,6 +581,15 @@ function AdminPage() {
             >
               <FileArchive size={16} />
               {isImporting ? 'Importando...' : 'Importar JW'}
+            </button>
+            <button onClick={handleGenerateQrCode} style={{
+              padding:'0.6rem 1.2rem',
+              background:'rgba(34,197,94,0.1)', color:'#22c55e',
+              border:'1px solid rgba(34,197,94,0.2)', borderRadius:'8px',
+              cursor:'pointer', fontWeight:700, fontSize:'0.85rem',
+              display:'flex', alignItems:'center', gap:'0.4rem'
+            }}>
+              <QrCode size={16} /> QR Code Upload
             </button>
           </div>
           <div style={{ marginTop:'0.5rem', fontSize:'0.7rem', color:'#484f58' }}>
@@ -773,6 +834,16 @@ function AdminPage() {
           50% { opacity: 0.5; }
         }
       `}</style>
+      {showQrModal && (
+        <div style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000}} onClick={()=>setShowQrModal(false)}>
+          <div style={{background:'#111820',borderRadius:'16px',padding:'2rem',textAlign:'center',maxWidth:'400px'}} onClick={e=>e.stopPropagation()}>
+            <h2 style={{color:'#e1e4e8',marginBottom:'1rem'}}>📱 QR Code para Upload</h2>
+            <img src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrUrl)}`} style={{width:200,height:200,background:'white',padding:8,borderRadius:8}} />
+            <p style={{color:'#8b949e',fontSize:'0.75rem',marginTop:'1rem',wordBreak:'break-all'}}>{qrUrl}</p>
+            <button onClick={()=>setShowQrModal(false)} style={{marginTop:'1rem',padding:'0.5rem 1.5rem',background:'rgba(255,255,255,0.05)',color:'#8b949e',border:'1px solid rgba(255,255,255,0.08)',borderRadius:'8px',cursor:'pointer'}}>Fechar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

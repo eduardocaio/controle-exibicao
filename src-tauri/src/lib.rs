@@ -22,6 +22,8 @@ use image::GenericImageView;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use chrono::Timelike;
+use local_ip_address::local_ip;
+use warp::Buf;
 
 // Estrutura para gerenciar conexões WebSocket
 struct WsClients {
@@ -55,6 +57,23 @@ impl WsClients {
             senders.push(sender);
         }
     }
+}
+
+struct UploadSession {
+    token: String,
+    presentation_name: String,
+}
+
+struct UploadSessions {
+    sessions: Mutex<HashMap<String, UploadSession>>,
+}
+
+impl UploadSessions {
+    fn new() -> Self { Self { sessions: Mutex::new(HashMap::new()) } }
+}
+
+fn get_local_ip() -> String {
+    local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
@@ -1926,6 +1945,129 @@ async fn ensure_display_window(app_handle: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+async fn generate_upload_qr(upload_sessions: tauri::State<'_, Arc<UploadSessions>>) -> Result<String, String> {
+    let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_string();
+    let session = UploadSession {
+        token: token.clone(),
+        presentation_name: format!("Envio do Orador - {}", chrono::Local::now().format("%d/%m/%Y %H:%M")),
+    };
+    upload_sessions.sessions.lock().map_err(|e| e.to_string())?.insert(token.clone(), session);
+    Ok(format!("http://{}:20779/upload/{}", get_local_ip(), token))
+}
+
+fn start_upload_server(
+    app_state: SharedState,
+    app_handle: tauri::AppHandle,
+    upload_sessions: Arc<UploadSessions>,
+    ws_clients: Arc<WsClients>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let state = warp::any().map(move || (app_state.clone(), app_handle.clone(), upload_sessions.clone(), ws_clients.clone()));
+
+        let upload_page = warp::path!("upload" / String)
+            .and(warp::get())
+            .map(|token: String| {
+                let html = include_str!("../upload_page.html");
+                warp::reply::html(html.replace("{{TOKEN}}", &token))
+            });
+
+        let upload_api = warp::path!("api" / "upload" / String)
+            .and(warp::post())
+            .and(warp::multipart::form().max_length(100 * 1024 * 1024))
+            .and(state)
+            .and_then(move |token: String, mut form: warp::multipart::FormData, (state, handle, sessions, clients): (SharedState, tauri::AppHandle, Arc<UploadSessions>, Arc<WsClients>)| async move {
+                let session_name = {
+                    let map = sessions.sessions.lock().unwrap();
+                    map.get(&token).map(|s| s.presentation_name.clone())
+                };
+
+                if session_name.is_none() {
+                    return Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"error": "Link inválido"})));
+                }
+
+                let app_dir = get_data_dir(&handle);
+                let images_dir = app_dir.join("images");
+                let thumbs_dir = app_dir.join("thumbnails");
+                fs::create_dir_all(&images_dir).ok();
+                fs::create_dir_all(&thumbs_dir).ok();
+
+                let mut new_slides = Vec::new();
+
+                // Processar cada parte do formulário
+                while let Some(Ok(part)) = form.next().await {
+                    // Obter o nome do arquivo
+                    let filename = part.filename().unwrap_or("imagem.jpg").to_string();
+                    let ext = PathBuf::from(&filename)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("jpg")
+                        .to_lowercase();
+                    
+                    // Coletar bytes manualmente usando stream
+                    let mut data = Vec::new();
+                    let mut part_stream = part.stream();
+                    while let Some(result) = part_stream.next().await {
+                        match result {
+                            Ok(buf) => {
+                                let chunk = buf.chunk();
+                                data.extend_from_slice(chunk);
+                            },
+                            Err(_) => break,
+                        }
+                    }
+                    
+                    if !data.is_empty() {
+                        let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+                        let dest = images_dir.join(&new_filename);
+                        let thumb = thumbs_dir.join(&new_filename);
+
+                        // Escrever arquivo diretamente
+                        if fs::write(&dest, &data).is_ok() {
+                            // Criar thumbnail
+                            if let Ok(img) = image::open(&dest) {
+                                let (w, h) = img.dimensions();
+                                let opt = if w > 1920 || h > 1080 {
+                                    let new_w = (1080.0 * w as f32 / h as f32) as u32;
+                                    img.resize_exact(new_w, 1080, image::imageops::FilterType::Lanczos3)
+                                } else { img };
+                                let _ = opt.resize_exact(400, 300, image::imageops::FilterType::Lanczos3).save_with_format(&thumb, image::ImageFormat::Jpeg);
+                                // Salvar imagem otimizada
+                                let _ = opt.save_with_format(&dest, image::ImageFormat::Jpeg);
+                            }
+                            
+                            new_slides.push(Slide {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                filename: new_filename,
+                                order: new_slides.len(),
+                            });
+                        }
+                    }
+                }
+
+                if !new_slides.is_empty() {
+                    let mut app_state = state.write().await;
+                    let pres_id = uuid::Uuid::new_v4().to_string();
+                    app_state.presentations.push(Presentation {
+                        id: pres_id.clone(),
+                        name: session_name.unwrap(),
+                        slides: new_slides,
+                        active: false,
+                    });
+                    save_state_to_disk(&app_state, &handle);
+                    sessions.sessions.lock().unwrap().remove(&token);
+                    handle.emit("tablet-upload-complete", &pres_id).ok();
+                }
+
+                Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"success": true})))
+            });
+
+        let routes = upload_page.or(upload_api);
+        println!("📱 Servidor de Upload: http://0.0.0.0:20779");
+        warp::serve(routes).run(([0, 0, 0, 0], 20779)).await;
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1942,14 +2084,17 @@ pub fn run() {
             state.is_blackout = true;
             state.countdown.running = false;
             
-            let shared_state: SharedState = Arc::new(RwLock::new(state));
-            let clients = Arc::new(WsClients::new());
+            let shared_state: SharedState = Arc::new(RwLock::new(state)); // PRIMEIRO
+            let clients = Arc::new(WsClients::new()); // PRIMEIRO
+            let upload_sessions = Arc::new(UploadSessions::new()); // PRIMEIRO
             
             app.manage(shared_state.clone());
             app.manage(clients.clone());
+            app.manage(upload_sessions.clone());
             
-            start_ws_server(shared_state.clone(), app.handle().clone(), clients);
+            start_ws_server(shared_state.clone(), app.handle().clone(), clients.clone());
             start_http_control_server(shared_state.clone(), app.handle().clone());
+            start_upload_server(shared_state.clone(), app.handle().clone(), upload_sessions, clients);
             
             check_and_start_countdown(&shared_state, &app.handle());
             
@@ -1993,7 +2138,7 @@ pub fn run() {
             create_presentation, delete_presentation, set_active_presentation,
             upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
             extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
-            get_countdown_state, stop_countdown, ensure_display_window,
+            get_countdown_state, stop_countdown, ensure_display_window, generate_upload_qr,
         ])
         .run(tauri::generate_context!())
         .expect("erro");

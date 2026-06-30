@@ -1,7 +1,6 @@
 // ControlPage.tsx
 import { useState, useEffect, useRef } from 'react';
-import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare } from 'lucide-react';
-import Timer from '../components/Timer';
+import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock } from 'lucide-react';
 
 function ControlPage() {
   const [slides, setSlides] = useState<any[]>([]);
@@ -29,6 +28,21 @@ function ControlPage() {
       window.removeEventListener('orientationchange', handleResize);
     };
   }, []);
+
+  // Timer local para contagem contínua
+  useEffect(() => {
+    let interval: any = null;
+    
+    if (timerRunning) {
+      interval = setInterval(() => {
+        setTimerAccumulated(prev => prev + 1000);
+      }, 1000);
+    }
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [timerRunning]);
 
   const getServerIp = () => window.location.hostname;
 
@@ -65,19 +79,11 @@ function ControlPage() {
             setIsBlackout(data.is_blackout);
             setActivePresentationId(data.active_presentation_id || null);
             
-            // Gerar URLs das thumbnails
             const urls: Record<string, string> = {};
             newSlides.forEach((slide: any) => {
               urls[slide.filename] = getThumbnailUrl(slide.filename);
             });
             setThumbnailUrls(urls);
-            
-            console.log('📊 Estado recebido:', { 
-              slidesCount: newSlides.length, 
-              currentIndex: data.current_index,
-              isBlackout: data.is_blackout,
-              activePresentationId: data.active_presentation_id
-            });
           }
           
           if (data.type === 'timer_state') {
@@ -162,10 +168,6 @@ function ControlPage() {
     }
   };
 
-  const handleTimerControl = (action: string) => {
-    sendCommand('timer_control', { timer_action: action });
-  };
-
   const handleRequestWater = () => {
     if (connected) sendCommand('request_water');
   };
@@ -183,6 +185,39 @@ function ControlPage() {
       setIsBlackout(false);
       sendCommand('set_slide', { index: idx });
     }
+  };
+
+  const formatTime = (totalSeconds: number) => {
+    const secs = Math.max(0, totalSeconds);
+    const hours = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const remainingSecs = secs % 60;
+    
+    if (hours > 0) {
+      return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
+    }
+    return `${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
+  };
+
+  const getTimerColor = () => {
+    if (!timerRunning && timerAccumulated === 0) return '#6b7280';
+    if (timerAccumulated < 300000) return '#34d399';
+    if (timerAccumulated < 420000) return '#fbbf24';
+    return '#ef4444';
+  };
+
+  const getTimerBg = () => {
+    if (!timerRunning && timerAccumulated === 0) return 'rgba(255,255,255,0.04)';
+    if (timerAccumulated < 300000) return 'rgba(52,211,153,0.15)';
+    if (timerAccumulated < 420000) return 'rgba(251,191,36,0.15)';
+    return 'rgba(239,68,68,0.15)';
+  };
+
+  const getTimerBorder = () => {
+    if (!timerRunning && timerAccumulated === 0) return 'rgba(255,255,255,0.08)';
+    if (timerAccumulated < 300000) return 'rgba(52,211,153,0.3)';
+    if (timerAccumulated < 420000) return 'rgba(251,191,36,0.3)';
+    return 'rgba(239,68,68,0.3)';
   };
 
   const count = slides.length;
@@ -228,77 +263,286 @@ function ControlPage() {
       top: 0,
       left: 0,
     }}>
-      {/* Header */}
+      {/* Header - Timer e Botões na mesma linha */}
       <div style={{ 
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: '1rem',
-        padding: '0.8rem 1rem',
+        padding: '1rem 1.5rem',
         background: 'linear-gradient(180deg, #111820 0%, #0f1419 100%)',
         borderBottom: '1px solid rgba(255,255,255,0.06)',
         flexShrink: 0,
-        minHeight: '70px',
+        gap: '0.75rem',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <div style={{
-            width: '12px', height: '12px', borderRadius: '50%',
-            backgroundColor: connected ? '#34d399' : '#f87171',
-            boxShadow: connected ? '0 0 10px rgba(52,211,153,0.5)' : '0 0 10px rgba(248,113,113,0.5)',
-            animation: connected ? 'pulse 2s infinite' : 'none',
-          }} />
-          <div>
-            <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#e1e4e8', letterSpacing: '0.5px' }}>
-              Orador
-            </span>
-            {!connected && (
-              <span style={{ fontSize: '0.75rem', color: '#f87171', fontWeight: 500, marginLeft: '0.5rem' }}>
-                ● Offline
+        {/* Status e Título */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          width: '100%',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{
+              width: '14px', height: '14px', borderRadius: '50%',
+              backgroundColor: connected ? '#34d399' : '#f87171',
+              boxShadow: connected ? '0 0 12px rgba(52,211,153,0.5)' : '0 0 12px rgba(248,113,113,0.5)',
+              animation: connected ? 'pulse 2s infinite' : 'none',
+            }} />
+            <div>
+              <span style={{ fontSize: '1.1rem', fontWeight: 700, color: '#e1e4e8', letterSpacing: '0.5px' }}>
+                Orador
               </span>
-            )}
+              {!connected && (
+                <span style={{ fontSize: '0.8rem', color: '#f87171', fontWeight: 500, marginLeft: '0.5rem' }}>
+                  ● Offline
+                </span>
+              )}
+            </div>
+          </div>
+          
+          {slides.length > 0 && (
+            <div style={{
+              padding: '0.35rem 0.75rem',
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: '20px',
+              border: '1px solid rgba(255,255,255,0.06)',
+              fontSize: '0.8rem',
+              color: '#8b949e',
+              fontWeight: 600,
+            }}>
+              {slides.length} slides
+            </div>
+          )}
+        </div>
+        
+        {/* Timer + Botões na mesma linha - MAIORES */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '1.25rem',
+          width: '100%',
+          flexWrap: 'wrap',
+        }}>
+          {/* Timer - MAIOR */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1.25rem',
+            background: 'linear-gradient(135deg, rgba(102,126,234,0.08) 0%, rgba(102,126,234,0.03) 100%)',
+            borderRadius: '16px',
+            padding: '0.75rem 2rem',
+            border: '1.5px solid rgba(102,126,234,0.15)',
+          }}>
+            <div style={{
+              width: '56px',
+              height: '56px',
+              borderRadius: '14px',
+              background: getTimerBg(),
+              border: `2px solid ${getTimerBorder()}`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.3s ease',
+            }}>
+              <Clock size={28} color={getTimerColor()} />
+            </div>
+            
+            <span style={{
+              fontWeight: 800,
+              fontSize: '3.2rem',
+              fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
+              color: getTimerColor(),
+              letterSpacing: '4px',
+              minWidth: '140px',
+              textAlign: 'center',
+              lineHeight: '1',
+              transition: 'color 0.3s ease',
+            }}>
+              {formatTime(Math.floor(timerAccumulated / 1000))}
+            </span>
+
+            <div style={{
+              display: 'flex',
+              gap: '0.5rem',
+              background: 'rgba(255,255,255,0.03)',
+              borderRadius: '10px',
+              padding: '0.35rem',
+            }}>
+              {!timerRunning ? (
+                <button
+                  onClick={() => sendCommand('timer_control', { timer_action: 'start' })}
+                  style={{
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    background: 'rgba(52,211,153,0.15)',
+                    color: '#34d399',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(52,211,153,0.25)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(52,211,153,0.15)'}
+                  title="Iniciar"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="6,3 20,12 6,21" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  onClick={() => sendCommand('timer_control', { timer_action: 'pause' })}
+                  style={{
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    background: 'rgba(251,191,36,0.15)',
+                    color: '#fbbf24',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(251,191,36,0.25)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(251,191,36,0.15)'}
+                  title="Pausar"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="3" width="4" height="18" rx="1" />
+                    <rect x="14" y="3" width="4" height="18" rx="1" />
+                  </svg>
+                </button>
+              )}
+              
+              {(timerAccumulated > 0) && (
+                <button
+                  onClick={() => sendCommand('timer_control', { timer_action: 'reset' })}
+                  style={{
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    background: 'rgba(239,68,68,0.15)',
+                    color: '#ef4444',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(239,68,68,0.25)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(239,68,68,0.15)'}
+                  title="Resetar"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="1 4 1 10 7 10" />
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Botões de Água e Indicador - MAIORES */}
+          <div style={{
+            display: 'flex',
+            gap: '1rem',
+          }}>
+            <button onClick={handleRequestWater} style={{
+              padding: '1.1rem 2rem',
+              background: 'linear-gradient(135deg, rgba(59,130,246,0.12) 0%, rgba(59,130,246,0.06) 100%)',
+              color: '#60a5fa',
+              border: '2px solid rgba(59,130,246,0.2)',
+              borderRadius: '14px',
+              cursor: 'pointer',
+              fontSize: '1.15rem',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '0.75rem',
+              transition: 'all 0.2s ease',
+              WebkitTapHighlightColor: 'transparent',
+              boxShadow: '0 4px 12px rgba(59,130,246,0.05)',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(59,130,246,0.2) 0%, rgba(59,130,246,0.12) 100%)';
+              e.currentTarget.style.borderColor = 'rgba(59,130,246,0.4)';
+              e.currentTarget.style.transform = 'translateY(-2px)';
+              e.currentTarget.style.boxShadow = '0 8px 24px rgba(59,130,246,0.15)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(59,130,246,0.12) 0%, rgba(59,130,246,0.06) 100%)';
+              e.currentTarget.style.borderColor = 'rgba(59,130,246,0.2)';
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(59,130,246,0.05)';
+            }}
+            >
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: 'rgba(59,130,246,0.15)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <GlassWater size={26} color="#60a5fa" />
+              </div>
+              <span style={{ letterSpacing: '0.5px' }}>Água</span>
+            </button>
+            
+            <button onClick={handleRequestIndicator} style={{
+              padding: '1.1rem 2rem',
+              background: 'linear-gradient(135deg, rgba(245,158,11,0.12) 0%, rgba(245,158,11,0.06) 100%)',
+              color: '#fbbf24',
+              border: '2px solid rgba(245,158,11,0.2)',
+              borderRadius: '14px',
+              cursor: 'pointer',
+              fontSize: '1.15rem',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '0.75rem',
+              transition: 'all 0.2s ease',
+              WebkitTapHighlightColor: 'transparent',
+              boxShadow: '0 4px 12px rgba(245,158,11,0.05)',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(245,158,11,0.2) 0%, rgba(245,158,11,0.12) 100%)';
+              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.4)';
+              e.currentTarget.style.transform = 'translateY(-2px)';
+              e.currentTarget.style.boxShadow = '0 8px 24px rgba(245,158,11,0.15)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(245,158,11,0.12) 0%, rgba(245,158,11,0.06) 100%)';
+              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.2)';
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(245,158,11,0.05)';
+            }}
+            >
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: 'rgba(245,158,11,0.15)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <UserPlus size={26} color="#fbbf24" />
+              </div>
+              <span style={{ letterSpacing: '0.5px' }}>Indicador</span>
+            </button>
           </div>
         </div>
-
-        <Timer 
-          onControl={handleTimerControl} 
-          currentSeconds={timerAccumulated}
-          isRunning={timerRunning}
-          size="large"
-        />
-      </div>
-
-      {/* Botões de ação */}
-      <div style={{
-        display: 'flex',
-        gap: '0.75rem',
-        padding: '0.75rem 1rem',
-        flexShrink: 0,
-        background: 'rgba(15,20,25,0.5)',
-        borderBottom: '1px solid rgba(255,255,255,0.04)',
-      }}>
-        <button onClick={handleRequestWater} style={{
-          flex: 1, padding: '0.9rem',
-          background: 'rgba(59,130,246,0.1)', color: '#60a5fa',
-          border: '1.5px solid rgba(59,130,246,0.25)', borderRadius: '12px',
-          cursor: 'pointer', fontSize: '0.95rem', fontWeight: 700,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: '0.6rem', transition: 'all 0.2s',
-          WebkitTapHighlightColor: 'transparent',
-        }}>
-          <GlassWater size={22} /><span>Água</span>
-        </button>
-        
-        <button onClick={handleRequestIndicator} style={{
-          flex: 1, padding: '0.9rem',
-          background: 'rgba(245,158,11,0.1)', color: '#fbbf24',
-          border: '1.5px solid rgba(245,158,11,0.25)', borderRadius: '12px',
-          cursor: 'pointer', fontSize: '0.95rem', fontWeight: 700,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: '0.6rem', transition: 'all 0.2s',
-          WebkitTapHighlightColor: 'transparent',
-        }}>
-          <UserPlus size={22} /><span>Indicador</span>
-        </button>
       </div>
 
       {/* Grid de imagens */}

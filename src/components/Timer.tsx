@@ -17,29 +17,21 @@ function Timer({ onControl, currentSeconds: externalSeconds, isRunning: external
 
   const isLarge = size === 'large';
 
-  // Escutar atualizações do timer via eventos Tauri (Admin)
   useEffect(() => {
     const unlisten = listen('timer-update', (event: any) => {
       const data = event.payload;
-      
       setRunning(data.running);
-      
       if (data.accumulated !== undefined) {
         const seconds = Math.floor(data.accumulated / 1000);
         setDisplaySeconds(seconds);
       }
     });
-
-    return () => {
-      unlisten.then(fn => fn());
-    };
+    return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // Sincronizar com props externas (para o ControlPage via WebSocket)
   useEffect(() => {
     if (externalSeconds !== undefined) {
-      const seconds = Math.floor(externalSeconds / 1000);
-      setDisplaySeconds(seconds);
+      setDisplaySeconds(Math.floor(externalSeconds / 1000));
     }
   }, [externalSeconds]);
 
@@ -49,23 +41,17 @@ function Timer({ onControl, currentSeconds: externalSeconds, isRunning: external
     }
   }, [externalRunning]);
 
-  // Timer local para contagem suave
   useEffect(() => {
     if (localIntervalRef.current) {
       clearInterval(localIntervalRef.current);
       localIntervalRef.current = null;
     }
-
     if (!running) return;
-
     localIntervalRef.current = setInterval(() => {
       setDisplaySeconds(prev => prev + 1);
     }, 1000);
-
     return () => {
-      if (localIntervalRef.current) {
-        clearInterval(localIntervalRef.current);
-      }
+      if (localIntervalRef.current) clearInterval(localIntervalRef.current);
     };
   }, [running]);
 
@@ -82,144 +68,185 @@ function Timer({ onControl, currentSeconds: externalSeconds, isRunning: external
   };
 
   const getProgressColor = () => {
-    if (!running && displaySeconds === 0) return '#484f58';
+    if (!running && displaySeconds === 0) return '#6b7280';
     if (displaySeconds < 300) return '#34d399';
     if (displaySeconds < 420) return '#fbbf24';
     return '#ef4444';
   };
 
-  const getBackgroundColor = () => {
-    if (!running && displaySeconds === 0) return 'rgba(255,255,255,0.02)';
-    if (displaySeconds < 300) return 'rgba(52,211,153,0.08)';
-    if (displaySeconds < 420) return 'rgba(251,191,36,0.08)';
-    return 'rgba(239,68,68,0.08)';
-  };
-
   const canReset = !running && displaySeconds > 0;
 
-  // Estilos baseados no tamanho
-  const containerStyle = isLarge ? {
-    gap: '1rem',
-    padding: '0.8rem 1.5rem',
-  } : {
-    gap: '0.5rem',
-    padding: '0.5rem 0.75rem',
-  };
+  if (isLarge) {
+    // Versão GRANDE para o Admin
+    return (
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '1.25rem',
+      }}>
+        {/* Display do tempo */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+        }}>
+          <div style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '12px',
+            background: running ? `${getProgressColor()}20` : 'rgba(255,255,255,0.04)',
+            border: `1.5px solid ${getProgressColor()}40`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            <Clock size={22} color={getProgressColor()} />
+          </div>
+          
+          <span style={{
+            fontWeight: 800,
+            fontSize: '2.2rem',
+            fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
+            color: getProgressColor(),
+            letterSpacing: '3px',
+            minWidth: '110px',
+            textAlign: 'center',
+            lineHeight: '1',
+          }}>
+            {formatTime(displaySeconds)}
+          </span>
+        </div>
 
-  const iconContainerStyle = isLarge ? {
-    width: '42px',
-    height: '42px',
-    borderRadius: '10px',
-  } : {
-    width: '28px',
-    height: '28px',
-    borderRadius: '8px',
-  };
+        {/* Botões de controle */}
+        <div style={{
+          display: 'flex',
+          gap: '0.5rem',
+          background: 'rgba(255,255,255,0.03)',
+          borderRadius: '10px',
+          padding: '0.35rem',
+        }}>
+          {!running ? (
+            <button
+              onClick={() => onControl('start')}
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '8px',
+                border: 'none',
+                background: 'rgba(52,211,153,0.15)',
+                color: '#34d399',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(52,211,153,0.25)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(52,211,153,0.15)'; }}
+              title="Iniciar cronômetro"
+            >
+              <Play size={20} />
+            </button>
+          ) : (
+            <button
+              onClick={() => onControl('pause')}
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '8px',
+                border: 'none',
+                background: 'rgba(251,191,36,0.15)',
+                color: '#fbbf24',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(251,191,36,0.25)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(251,191,36,0.15)'; }}
+              title="Pausar cronômetro"
+            >
+              <Pause size={20} />
+            </button>
+          )}
+          
+          <button
+            onClick={() => canReset && onControl('reset')}
+            style={{
+              width: '40px',
+              height: '40px',
+              borderRadius: '8px',
+              border: 'none',
+              background: canReset ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.03)',
+              color: canReset ? '#ef4444' : '#484f58',
+              cursor: canReset ? 'pointer' : 'not-allowed',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.15s',
+              opacity: canReset ? 1 : 0.4,
+            }}
+            disabled={!canReset}
+            onMouseEnter={e => { if (canReset) e.currentTarget.style.background = 'rgba(239,68,68,0.25)'; }}
+            onMouseLeave={e => { if (canReset) e.currentTarget.style.background = 'rgba(239,68,68,0.15)'; }}
+            title={canReset ? "Resetar cronômetro" : "Pause para resetar"}
+          >
+            <RotateCcw size={20} />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
-  const iconSize = isLarge ? 22 : 14;
-
-  const timeFontStyle = isLarge ? {
-    fontSize: '2rem',
-    minWidth: displaySeconds >= 3600 ? '120px' : '90px',
-    letterSpacing: '2px',
-  } : {
-    fontSize: '0.95rem',
-    minWidth: displaySeconds >= 3600 ? '70px' : '48px',
-    letterSpacing: '0.5px',
-  };
-
-  const buttonStyle = isLarge ? {
-    width: '42px',
-    height: '42px',
-    borderRadius: '10px',
-  } : {
-    width: '28px',
-    height: '28px',
-    borderRadius: '6px',
-  };
-
-  const buttonIconSize = isLarge ? 20 : 13;
-
+  // Versão NORMAL para o ControlPage
   return (
     <div style={{
       display: 'flex',
       alignItems: 'center',
-      background: getBackgroundColor(),
-      borderRadius: isLarge ? '14px' : '10px',
-      border: `1px solid ${getProgressColor()}20`,
-      transition: 'all 0.3s ease',
-      ...containerStyle,
+      gap: '0.5rem',
+      padding: '0.5rem 0.75rem',
+      background: 'rgba(255,255,255,0.02)',
+      borderRadius: '10px',
+      border: '1px solid rgba(255,255,255,0.04)',
     }}>
-      <div style={{
-        background: running ? `${getProgressColor()}15` : 'rgba(255,255,255,0.03)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        ...iconContainerStyle,
-      }}>
-        <Clock size={iconSize} color={getProgressColor()} />
-      </div>
-      
+      <Clock size={14} color="#8b949e" />
       <span style={{
-        fontWeight: 800,
-        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-        color: getProgressColor(),
-        textAlign: 'center',
-        transition: 'color 0.3s ease',
-        ...timeFontStyle,
+        fontWeight: 700,
+        fontSize: '0.95rem',
+        fontFamily: "'JetBrains Mono', monospace",
+        color: '#e1e4e8',
+        minWidth: '48px',
       }}>
         {formatTime(displaySeconds)}
       </span>
-      
-      <div style={{ display: 'flex', gap: isLarge ? '0.5rem' : '0.25rem' }}>
+      <div style={{ display: 'flex', gap: '0.25rem' }}>
         {!running ? (
-          <button
-            onClick={() => onControl('start')}
-            style={{
-              border: 'none',
-              background: 'rgba(52,211,153,0.1)',
-              color: '#34d399',
-              cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              transition: 'all 0.15s',
-              ...buttonStyle,
-            }}
-            title="Iniciar"
-          >
-            <Play size={buttonIconSize} />
+          <button onClick={() => onControl('start')} style={{
+            width: '28px', height: '28px', borderRadius: '6px', border: 'none',
+            background: 'rgba(52,211,153,0.1)', color: '#34d399', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Play size={13} />
           </button>
         ) : (
-          <button
-            onClick={() => onControl('pause')}
-            style={{
-              border: 'none',
-              background: 'rgba(251,191,36,0.1)',
-              color: '#fbbf24',
-              cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              transition: 'all 0.15s',
-              ...buttonStyle,
-            }}
-            title="Pausar"
-          >
-            <Pause size={buttonIconSize} />
+          <button onClick={() => onControl('pause')} style={{
+            width: '28px', height: '28px', borderRadius: '6px', border: 'none',
+            background: 'rgba(251,191,36,0.1)', color: '#fbbf24', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Pause size={13} />
           </button>
         )}
-        
-        <button
-          onClick={() => canReset && onControl('reset')}
-          style={{
-            border: 'none',
-            background: canReset ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.02)',
-            color: canReset ? '#ef4444' : '#484f58',
-            cursor: canReset ? 'pointer' : 'not-allowed',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'all 0.15s',
-            opacity: canReset ? 1 : 0.3,
-            ...buttonStyle,
-          }}
-          disabled={!canReset}
-          title={canReset ? "Resetar" : "Pause o cronômetro para resetar"}
-        >
-          <RotateCcw size={buttonIconSize} />
+        <button onClick={() => canReset && onControl('reset')} style={{
+          width: '28px', height: '28px', borderRadius: '6px', border: 'none',
+          background: canReset ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.02)',
+          color: canReset ? '#ef4444' : '#484f58',
+          cursor: canReset ? 'pointer' : 'not-allowed',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          opacity: canReset ? 1 : 0.3,
+        }} disabled={!canReset}>
+          <RotateCcw size={13} />
         </button>
       </div>
     </div>

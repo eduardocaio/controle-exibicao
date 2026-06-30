@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enviar Imagens</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,sans-serif;background:#0b0e11;color:#e1e4e8;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+        .container{background:#111820;border-radius:16px;padding:2rem;max-width:450px;width:100%;text-align:center}
+        h1{font-size:1.3rem;margin-bottom:.5rem}
+        p{color:#8b949e;margin-bottom:1.5rem;font-size:.85rem}
+        .upload-area{border:2px dashed rgba(102,126,234,.3);border-radius:12px;padding:2rem;margin-bottom:1rem;cursor:pointer;background:rgba(102,126,234,.03)}
+        .upload-area:hover,.dragover{border-color:#667eea;background:rgba(102,126,234,.06)}
+        #file-input{display:none}
+        .btn{padding:.75rem 2rem;background:#667eea;color:#fff;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;width:100%}
+        .btn:disabled{opacity:.5;cursor:not-allowed}
+        .preview{display:flex;flex-wrap:wrap;gap:.5rem;margin:1rem 0;justify-content:center}
+        .preview img{width:70px;height:70px;object-fit:cover;border-radius:8px}
+        .success{color:#34d399;margin-top:1rem;font-weight:600}
+        .error{color:#f87171;margin-top:1rem}
+        .count{background:rgba(102,126,234,.1);color:#667eea;padding:.25rem .75rem;border-radius:20px;font-size:.8rem;display:inline-block;margin-bottom:1rem}
+        .icon{font-size:2.5rem;margin-bottom:.5rem}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Enviar Imagens</h1>
+        <p>Selecione as imagens para enviar ao operador</p>
+        <div class="upload-area" id="drop-area" onclick="document.getElementById('file-input').click()">
+            <div class="icon">📁</div>
+            <div>Toque para selecionar</div>
+        </div>
+        <input type="file" id="file-input" accept="image/*" multiple>
+        <div id="count" class="count" style="display:none"></div>
+        <div id="preview" class="preview"></div>
+        <button id="send-btn" class="btn" disabled onclick="sendImages()">Enviar</button>
+        <div id="status"></div>
+    </div>
+    <script>
+        const TOKEN="{{TOKEN}}";
+        let files=[];
+        const fi=document.getElementById('file-input');
+        const pr=document.getElementById('preview');
+        const ct=document.getElementById('count');
+        const sb=document.getElementById('send-btn');
+        const st=document.getElementById('status');
+        const da=document.getElementById('drop-area');
+        fi.addEventListener('change',e=>handleFiles(e.target.files));
+        da.addEventListener('dragover',e=>{e.preventDefault();da.classList.add('dragover')});
+        da.addEventListener('dragleave',()=>da.classList.remove('dragover'));
+        da.addEventListener('drop',e=>{e.preventDefault();da.classList.remove('dragover');handleFiles(e.dataTransfer.files)});
+        function handleFiles(fl){files=Array.from(fl).filter(f=>f.type.startsWith('image/'));ct.style.display=files.length?'inline-block':'none';ct.textContent=files.length+' imagem(ns)';sb.disabled=!files.length;pr.innerHTML='';files.slice(0,12).forEach(f=>{const r=new FileReader();r.onload=e=>{const i=document.createElement('img');i.src=e.target.result;pr.appendChild(i)};r.readAsDataURL(f)})}
+        async function sendImages(){if(!files.length)return;sb.disabled=true;sb.textContent='Enviando...';const fd=new FormData();files.forEach(f=>fd.append('images',f));try{const r=await fetch('/api/upload/'+TOKEN,{method:'POST',body:fd});const j=await r.json();if(j.success){st.innerHTML='<div class="success">Enviado com sucesso!</div>';files=[];pr.innerHTML='';ct.style.display='none'}else{st.innerHTML='<div class="error">Erro: '+(j.error||'desconhecido')+'</div>'}}catch(e){st.innerHTML='<div class="error">Erro de conexão</div>'}sb.disabled=false;sb.textContent='Enviar'}
+    </script>
+</body>
+</html>

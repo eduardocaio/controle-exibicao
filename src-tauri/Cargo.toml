@@ -29,3 +29,6 @@ base64 = "0.21"
 rusqlite = { version = "0.31", features = ["bundled"] }
 zip = "0.6"
 chrono = "0.4"
+local-ip-address = "0.6"
+bytes = "1"
+serde_json = "1.0"

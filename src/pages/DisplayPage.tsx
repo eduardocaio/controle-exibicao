@@ -20,6 +20,18 @@ function DisplayPage() {
   }, []);
 
   useEffect(() => {
+      const unlisten = listen('countdown-force-display', (event: any) => {
+          // Forçar exibição da tela de contagem
+          setShowCountdown(true);
+          setCountdownData(event.payload);
+      });
+      
+      return () => {
+          unlisten.then(fn => fn());
+      };
+  }, []);
+
+  useEffect(() => {
     (async () => { 
       try { 
         setDefaultImage(await invoke('get_default_image') as string); 
