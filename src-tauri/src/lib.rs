@@ -1219,17 +1219,32 @@ async fn get_operator_message(state: tauri::State<'_, SharedState>) -> Result<St
 // FUNÇÕES DE SISTEMA
 
 async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(w) = app_handle.get_webview_window("display") {
-        w.set_always_on_top(false).ok();
-        w.hide().ok();
-    }
+    // Só esconde a janela display se o cronômetro NÃO estiver rodando
+    let countdown_running = {
+        if let Some(state) = app_handle.try_state::<SharedState>() {
+            let state = state.read().await;
+            state.countdown.running
+        } else {
+            false
+        }
+    };
     
-    std::process::Command::new("powershell")
-        .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
-            "$wshell = New-Object -ComObject WScript.Shell;",
-            "$wshell.AppActivate('JW Library');"
-        ])
-        .spawn().ok();
+    if !countdown_running {
+        if let Some(w) = app_handle.get_webview_window("display") {
+            w.set_always_on_top(false).ok();
+            w.hide().ok();
+        }
+        
+        std::process::Command::new("powershell")
+            .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
+                "$wshell = New-Object -ComObject WScript.Shell;",
+                "$wshell.AppActivate('JW Library');"
+            ])
+            .spawn().ok();
+    } else {
+        // Se o cronômetro está rodando, mostra a janela display em vez de esconder
+        show_display_window_internal(app_handle).await.ok();
+    }
     
     app_handle.emit("switch-app", "jw").ok();
     Ok(())

@@ -220,11 +220,31 @@ function AdminPage() {
   };
 
   const handleHideImage = async () => {
+    // Primeiro define blackout para remover a imagem
     await invoke('set_blackout', { value: true });
-    await invoke('switch_to_jw_library');
     setActiveImageIndex(null);
     setIsBlackout(true);
-    setActiveApp('jw');
+    
+    // Depois verifica se o cronômetro está rodando
+    try {
+      const countdownState = JSON.parse(await invoke('get_countdown_state') as string);
+      
+      if (countdownState.running && countdownState.seconds_left > 0) {
+        // Cronômetro ativo: manter a janela display visível
+        // Não chama switch_to_jw_library
+        // Apenas garante que a janela display está visível
+        await invoke('show_display_window');
+        setActiveApp('sistema');
+      } else {
+        // Sem cronômetro: vai para JW Library normalmente
+        await invoke('switch_to_jw_library');
+        setActiveApp('jw');
+      }
+    } catch (_) {
+      // Fallback: vai para JW Library
+      await invoke('switch_to_jw_library');
+      setActiveApp('jw');
+    }
   };
 
   const handleSwitchToJW = async () => { 
