@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "controle-exibicao",
+  "productName": "Controle de Exibição",
   "version": "0.1.0",
   "identifier": "com.caio-eduardo.controle-exibicao",
   "build": {
