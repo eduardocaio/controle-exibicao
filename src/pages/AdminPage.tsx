@@ -149,8 +149,8 @@ function AdminPage() {
     try {
       const presentationId = await invoke('extract_jw_playlist', { filePath });
       await loadPresentations();
-      // Expandir a apresentação importada
-      setExpandedPresentation(presentationId);
+      // Expandir a apresentação importada - CORRIGIDO: convertendo para string
+      setExpandedPresentation(String(presentationId));
       alert('Arquivo JW importado com sucesso! As imagens foram extraídas na ordem da playlist.');
     } catch (e) {
       console.error('Erro ao importar JW:', e);
@@ -661,7 +661,6 @@ function AdminPage() {
                 hoveredId={hoveredId}
                 setHoveredId={setHoveredId}
                 isCurrentActivePresentation={activePresentationId === pres.id}
-                canShowImages={!!activePresentationId}
               />
             ))}
           </div>
@@ -853,7 +852,7 @@ function PresentationCard({
   presentation, isExpanded, isActive, onToggleExpand, onDelete, onUpload, 
   onDeleteSlide, onSetActive, onShowImage, onHideImage, activeImageIndex, 
   isBlackout, thumbCache, loadThumb, hoveredId, setHoveredId, 
-  isCurrentActivePresentation, canShowImages 
+  isCurrentActivePresentation 
 }: any) {
   return (
     <div style={{ 

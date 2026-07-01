@@ -12,7 +12,6 @@ function DisplayPage() {
   const [countdownRunning, setCountdownRunning] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const [countdownTarget, setCountdownTarget] = useState('');
-  const [countdownLabel, setCountdownLabel] = useState('');
 
   useEffect(() => {
     const unlisten = listen('texto-do-ano-atualizado', () => setRefreshKey(prev => prev + 1));
@@ -22,8 +21,8 @@ function DisplayPage() {
   useEffect(() => {
       const unlisten = listen('countdown-force-display', (event: any) => {
           // Forçar exibição da tela de contagem
-          setShowCountdown(true);
-          setCountdownData(event.payload);
+          setCountdownRunning(true);
+          setCountdownTarget(event.payload);
       });
       
       return () => {
@@ -61,7 +60,6 @@ function DisplayPage() {
         setCountdownRunning(state.running);
         setCountdownSeconds(state.seconds_left);
         setCountdownTarget(state.target_time || '');
-        setCountdownLabel(state.label || '');
       } catch (_) {}
     };
 
@@ -76,14 +74,12 @@ function DisplayPage() {
       setCountdownRunning(event.payload.running);
       setCountdownSeconds(event.payload.seconds_left);
       setCountdownTarget(event.payload.target_time || '');
-      setCountdownLabel(event.payload.label || '');
     });
 
     const unlistenStop = listen('countdown-stop', () => {
       setCountdownRunning(false);
       setCountdownSeconds(0);
       setCountdownTarget('');
-      setCountdownLabel('');
     });
 
     return () => {
