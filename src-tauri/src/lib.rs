@@ -2098,6 +2098,19 @@ pub fn run() {
             
             check_and_start_countdown(&shared_state, &app.handle());
             
+            // ✅ Fechar completamente ao clicar no X
+            let window = app.get_webview_window("main").unwrap();
+            let app_handle = app.handle().clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    // Fecha todas as janelas e encerra o app
+                    if let Some(display) = app_handle.get_webview_window("display") {
+                        display.close().ok();
+                    }
+                    app_handle.exit(0);
+                }
+            });
+            
             // ✅ INICIAR NO JW LIBRARY - Emite apenas o evento de switch
             // O AdminPage vai escutar e atualizar o estado visual
             let handle = app.handle().clone();
