@@ -94,6 +94,7 @@ pub struct CountdownState {
     pub target_time: Option<String>, // "HH:MM"
     pub seconds_left: u64,
     pub label: String,
+    pub stopped_manually: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +132,7 @@ impl AppState {
                 target_time: None,
                 seconds_left: 0,
                 label: String::new(),
+                stopped_manually: false,
             },
         }
     }

@@ -1219,7 +1219,6 @@ async fn get_operator_message(state: tauri::State<'_, SharedState>) -> Result<St
 // FUNÇÕES DE SISTEMA
 
 async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    // Só esconde a janela display se o cronômetro NÃO estiver rodando
     let countdown_running = {
         if let Some(state) = app_handle.try_state::<SharedState>() {
             let state = state.read().await;
@@ -1231,7 +1230,7 @@ async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<
     
     if !countdown_running {
         if let Some(w) = app_handle.get_webview_window("display") {
-            w.set_always_on_top(false).ok();
+            // w.set_always_on_top(false).ok();
             w.hide().ok();
         }
         
@@ -1241,12 +1240,13 @@ async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<
                 "$wshell.AppActivate('JW Library');"
             ])
             .spawn().ok();
+        
+        app_handle.emit("switch-app", "jw").ok(); // ✅ Só emite "jw" se NÃO tem cronômetro
     } else {
-        // Se o cronômetro está rodando, mostra a janela display em vez de esconder
         show_display_window_internal(app_handle).await.ok();
+        app_handle.emit("switch-app", "sistema").ok(); // ✅ Emite "sistema" se tem cronômetro
     }
     
-    app_handle.emit("switch-app", "jw").ok();
     Ok(())
 }
 
@@ -1705,7 +1705,7 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
     if let Some(w) = app_handle.get_webview_window("display") {
         w.unminimize().map_err(|e| e.to_string())?; 
         w.show().map_err(|e| e.to_string())?;
-        w.set_always_on_top(true).map_err(|e| e.to_string())?; 
+        // w.set_always_on_top(true).map_err(|e| e.to_string())?; 
         w.set_fullscreen(true).map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?; 
         return Ok(());
@@ -1714,7 +1714,7 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
         .title("Tela de Exibição")
         .inner_size(800.0, 600.0)
         .decorations(false)
-        .always_on_top(true)
+        // .always_on_top(true)
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
@@ -1724,7 +1724,7 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
         window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).map_err(|e| e.to_string())?;
         window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).map_err(|e| e.to_string())?;
     }
-    window.set_always_on_top(true).map_err(|e| e.to_string())?; 
+    // window.set_always_on_top(true).map_err(|e| e.to_string())?; 
     window.set_fullscreen(true).map_err(|e| e.to_string())?;
     window.show().map_err(|e| e.to_string())?; 
     window.set_focus().map_err(|e| e.to_string())?;
@@ -1820,12 +1820,23 @@ async fn stop_countdown(
     app_state.countdown.seconds_left = 0;
     app_state.countdown.target_time = None;
     app_state.countdown.label = String::new();
+    app_state.countdown.stopped_manually = true;
     save_state_to_disk(&app_state, &app_handle);
     
     app_handle.emit("countdown-stop", ()).map_err(|e| e.to_string())?;
     
-    drop(app_state);
-    switch_to_jw_library_internal(&app_handle).await?;
+    // Força ir para JW Library
+    if let Some(w) = app_handle.get_webview_window("display") {
+        w.set_always_on_top(false).ok();
+        w.hide().ok();
+    }
+    std::process::Command::new("powershell")
+        .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
+            "$wshell = New-Object -ComObject WScript.Shell;",
+            "$wshell.AppActivate('JW Library');"
+        ])
+        .spawn().ok();
+    app_handle.emit("switch-app", "jw").ok();
     
     Ok(())
 }
@@ -1877,6 +1888,10 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
                         continue;
                     }
                 }
+                continue;
+            }
+
+            if app_state.countdown.stopped_manually {
                 continue;
             }
             
@@ -2098,6 +2113,7 @@ pub fn run() {
             state.current_slide_index = 0;
             state.is_blackout = true;
             state.countdown.running = false;
+            state.countdown.stopped_manually = false; 
             
             let shared_state: SharedState = Arc::new(RwLock::new(state)); // PRIMEIRO
             let clients = Arc::new(WsClients::new()); // PRIMEIRO
