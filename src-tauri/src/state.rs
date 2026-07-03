@@ -41,6 +41,8 @@ pub struct OperatorMessage {
     pub text: String,
     pub timestamp: u64,
     pub acknowledged: bool,
+    pub response_options: Vec<String>,
+    pub selected_response: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

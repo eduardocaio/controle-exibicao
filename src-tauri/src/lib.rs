@@ -1165,6 +1165,7 @@ async fn get_indicator_request(state: tauri::State<'_, SharedState>) -> Result<S
 #[tauri::command]
 async fn send_operator_message(
     text: String,
+    response_options: Vec<String>,
     state: tauri::State<'_, SharedState>,
     app_handle: tauri::AppHandle,
     ws_clients: tauri::State<'_, Arc<WsClients>>,
@@ -1180,6 +1181,8 @@ async fn send_operator_message(
         text: text.clone(),
         timestamp: now,
         acknowledged: false,
+        response_options, // ✅
+        selected_response: None, // ✅
     };
     
     app_state.operator_message = Some(message.clone());
@@ -1190,6 +1193,7 @@ async fn send_operator_message(
         "id": message.id,
         "text": message.text,
         "timestamp": message.timestamp,
+        "response_options": message.response_options, 
     }).to_string();
     ws_clients.broadcast(ws_msg);
     
@@ -1198,12 +1202,14 @@ async fn send_operator_message(
 
 #[tauri::command]
 async fn acknowledge_operator_message(
+    selected_response: Option<String>,
     state: tauri::State<'_, SharedState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let mut app_state = state.write().await;
     if let Some(ref mut msg) = app_state.operator_message {
         msg.acknowledged = true;
+        msg.selected_response = selected_response;
     }
     app_state.operator_message = None;
     app_handle.emit("operator-message-acknowledged", true).map_err(|e| e.to_string())?;
@@ -1347,6 +1353,7 @@ async fn handle_ws_connection(
                             "id": msg.id,
                             "text": msg.text,
                             "timestamp": msg.timestamp,
+                            "response_options": msg.response_options, // ✅
                         }).to_string();
                         let _ = s.send(Message::Text(op_msg)).await;
                     }
@@ -1490,15 +1497,21 @@ async fn handle_ws_connection(
                                 }
                                 "acknowledge_message" => {
                                     if let Some(ref mut msg) = st.operator_message {
+                                        let selected = cmd["response"].as_str().map(|s| s.to_string());
                                         msg.acknowledged = true;
+                                        msg.selected_response = selected.clone();
                                         
                                         let mut s = sender.lock().await;
                                         let _ = s.send(Message::Text(serde_json::json!({
-                                            "type": "message_acknowledged"
+                                            "type": "message_acknowledged",
+                                            "response": selected.clone()
                                         }).to_string())).await;
                                         
                                         drop(st);
-                                        app_handle.emit("operator-message-acknowledged", true).ok();
+                                        // ✅ Emitir objeto com a resposta
+                                        app_handle.emit("operator-message-acknowledged", &serde_json::json!({
+                                            "response": selected
+                                        })).ok();
                                         st = app_state.write().await;
                                         st.operator_message = None;
                                     }
@@ -2086,6 +2099,8 @@ fn start_upload_server(
                     });
                     save_state_to_disk(&app_state, &handle);
                     sessions.sessions.lock().unwrap().remove(&token);
+                    
+                    // ✅ Emitir evento para fechar o modal
                     handle.emit("tablet-upload-complete", &pres_id).ok();
                 }
 

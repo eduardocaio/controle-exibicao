@@ -111,6 +111,7 @@ function ControlPage() {
                 id: data.id,
                 text: data.text,
                 timestamp: data.timestamp,
+                response_options: data.response_options || [],
             });
           }
 
@@ -290,7 +291,7 @@ function ControlPage() {
             }} />
             <div>
               <span style={{ fontSize: '1.1rem', fontWeight: 700, color: '#e1e4e8', letterSpacing: '0.5px' }}>
-                Orador
+                Tribuna
               </span>
               {!connected && (
                 <span style={{ fontSize: '0.8rem', color: '#f87171', fontWeight: 500, marginLeft: '0.5rem' }}>
@@ -310,7 +311,7 @@ function ControlPage() {
               color: '#8b949e',
               fontWeight: 600,
             }}>
-              {slides.length} slides
+              {slides.length} {slides.length === 1 ? 'imagem' : 'imagens'}
             </div>
           )}
         </div>
@@ -713,15 +714,69 @@ function ControlPage() {
                 {operatorMessage.text}
               </p>
             </div>
-            <button onClick={handleAcknowledgeMessage} style={{
-              width: '100%', padding: '1rem',
-              background: 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)',
-              color: '#fff', border: 'none', borderRadius: '12px',
-              cursor: 'pointer', fontSize: '1.1rem', fontWeight: 700,
-              letterSpacing: '1px', transition: 'all 0.2s', marginTop: '0.5rem',
-            }}>
-              OK - ENTENDI
-            </button>
+            
+            {/* ✅ Opções de resposta */}
+            {operatorMessage.response_options && operatorMessage.response_options.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                {operatorMessage.response_options.map((option: string, idx: number) => (
+                  <button
+                    key={idx}
+                    onClick={() => {
+                      const ws = wsRef.current;
+                      if (ws?.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ 
+                          action: 'acknowledge_message',
+                          response: option 
+                        }));
+                        setOperatorMessage(null);
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '0.85rem',
+                      background: idx === 0 
+                        ? 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)' 
+                        : 'rgba(147,51,234,0.12)',
+                      color: '#fff',
+                      border: idx === 0 ? 'none' : '1px solid rgba(147,51,234,0.25)',
+                      borderRadius: '12px',
+                      cursor: 'pointer',
+                      fontSize: '1rem',
+                      fontWeight: 700,
+                      letterSpacing: '0.5px',
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={e => {
+                      if (idx !== 0) e.currentTarget.style.background = 'rgba(147,51,234,0.22)';
+                    }}
+                    onMouseLeave={e => {
+                      if (idx !== 0) e.currentTarget.style.background = 'rgba(147,51,234,0.12)';
+                    }}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            )}
+            
+            {/* Botão OK padrão (se não houver opções) */}
+            {(!operatorMessage.response_options || operatorMessage.response_options.length === 0) && (
+              <button onClick={() => {
+                const ws = wsRef.current;
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ action: 'acknowledge_message' }));
+                  setOperatorMessage(null);
+                }
+              }} style={{
+                width: '100%', padding: '1rem',
+                background: 'linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%)',
+                color: '#fff', border: 'none', borderRadius: '12px',
+                cursor: 'pointer', fontSize: '1.1rem', fontWeight: 700,
+                letterSpacing: '1px', transition: 'all 0.2s', marginTop: '0.5rem',
+              }}>
+                OK - ENTENDI
+              </button>
+            )}
           </div>
         </div>
       )}

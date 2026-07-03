@@ -39,6 +39,8 @@ function AdminPage() {
   const [isImporting, setIsImporting] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrUrl, setQrUrl] = useState('');
+  const [responseOptions, setResponseOptions] = useState<string[]>(['']);
+  const [selectedResponse, setSelectedResponse] = useState<string | null>(null);
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
@@ -50,6 +52,8 @@ function AdminPage() {
 
   useEffect(() => {
     const unlisten = listen('tablet-upload-complete', () => {
+      console.log('📱 Upload recebido!');
+      setShowQrModal(false);
       loadPresentations();
       alert('📱 O orador enviou imagens! Uma nova apresentação foi criada.');
     });
@@ -72,10 +76,19 @@ function AdminPage() {
       setIndicatorAlert(event.payload);
     });
 
-    const unlistenMessageAck = listen('operator-message-acknowledged', () => {
+    const unlistenMessageAck = listen('operator-message-acknowledged', (event: any) => {
         setMessageAcknowledged(true);
         setSentMessage(null);
-        setTimeout(() => setMessageAcknowledged(false), 5000);
+        
+        // ✅ Capturar a resposta selecionada
+        if (event.payload && event.payload.response) {
+            setSelectedResponse(event.payload.response);
+        }
+        
+        setTimeout(() => {
+            setMessageAcknowledged(false);
+            setSelectedResponse(null);
+        }, 5000);
     });
     
     return () => {
@@ -266,16 +279,24 @@ function AdminPage() {
   };
 
   const handleSendMessage = async () => {
-    if (!messageText.trim()) return;
-    
-    try {
-        await invoke('send_operator_message', { text: messageText.trim() });
-        setSentMessage({ text: messageText.trim() });
-        setMessageText('');
-        setMessageAcknowledged(false);
-    } catch (e) {
-        console.error('Erro ao enviar mensagem:', e);
-    }
+      if (!messageText.trim()) return;
+      
+      // Filtrar opções vazias
+      const options = responseOptions.filter(o => o.trim());
+      
+      try {
+          await invoke('send_operator_message', { 
+              text: messageText.trim(),
+              responseOptions: options.length > 0 ? options : ['OK - Entendi']
+          });
+          setSentMessage({ text: messageText.trim() });
+          setMessageText('');
+          setResponseOptions(['']);
+          setSelectedResponse(null);
+          setMessageAcknowledged(false);
+      } catch (e) {
+          console.error('Erro ao enviar mensagem:', e);
+      }
   };
 
   const handleAcknowledgeWater = async (requestId: string) => {
@@ -433,101 +454,169 @@ function AdminPage() {
             marginBottom: '1rem',
             border: '1px solid rgba(147,51,234,0.2)',
             display: 'flex',
+            flexDirection: 'column',
             gap: '0.75rem',
-            alignItems: 'center',
         }}>
-            <div style={{
-                width: '40px', height: '40px',
-                borderRadius: '10px',
-                background: 'rgba(147,51,234,0.12)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0,
-            }}>
-                <MessageSquare size={20} color="#a855f7" />
-            </div>
-            
-            <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <input
-                        type="text"
-                        value={messageText}
-                        onChange={(e) => setMessageText(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                        placeholder="Digite uma mensagem para o orador..."
-                        style={{
-                            flex: 1,
-                            padding: '0.65rem 0.85rem',
-                            background: 'rgba(255,255,255,0.03)',
-                            border: '1px solid rgba(255,255,255,0.08)',
-                            borderRadius: '8px',
-                            color: '#e1e4e8',
-                            fontSize: '0.85rem',
-                            outline: 'none',
-                        }}
-                    />
-                    <button
-                        onClick={handleSendMessage}
-                        disabled={!messageText.trim()}
-                        style={{
-                            padding: '0.65rem 1rem',
-                            background: messageText.trim() ? '#7c3aed' : 'rgba(124,58,237,0.3)',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: '8px',
-                            cursor: messageText.trim() ? 'pointer' : 'not-allowed',
-                            fontWeight: 600,
-                            fontSize: '0.82rem',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.4rem',
-                            transition: 'all 0.15s',
-                            opacity: messageText.trim() ? 1 : 0.5,
-                        }}
-                    >
-                        <Send size={14} />
-                        Enviar
-                    </button>
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                <div style={{
+                    width: '40px', height: '40px',
+                    borderRadius: '10px',
+                    background: 'rgba(147,51,234,0.12)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0,
+                }}>
+                    <MessageSquare size={20} color="#a855f7" />
                 </div>
                 
-                {sentMessage && !messageAcknowledged && (
-                    <div style={{
-                        marginTop: '0.5rem',
-                        padding: '0.4rem 0.75rem',
-                        background: 'rgba(147,51,234,0.08)',
-                        borderRadius: '6px',
-                        fontSize: '0.75rem',
-                        color: '#a855f7',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.4rem',
-                    }}>
-                        <div style={{
-                            width: '6px', height: '6px',
-                            borderRadius: '50%',
-                            backgroundColor: '#a855f7',
-                            animation: 'pulse 1.5s infinite',
-                        }} />
-                        Mensagem enviada: "{sentMessage.text}" - Aguardando confirmação...
+                <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <input
+                            type="text"
+                            value={messageText}
+                            onChange={(e) => setMessageText(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                            placeholder="Digite uma mensagem para o orador..."
+                            style={{
+                                flex: 1,
+                                padding: '0.65rem 0.85rem',
+                                background: 'rgba(255,255,255,0.03)',
+                                border: '1px solid rgba(255,255,255,0.08)',
+                                borderRadius: '8px',
+                                color: '#e1e4e8',
+                                fontSize: '0.85rem',
+                                outline: 'none',
+                            }}
+                        />
+                        <button
+                            onClick={handleSendMessage}
+                            disabled={!messageText.trim()}
+                            style={{
+                                padding: '0.65rem 1rem',
+                                background: messageText.trim() ? '#7c3aed' : 'rgba(124,58,237,0.3)',
+                                color: '#fff',
+                                border: 'none',
+                                borderRadius: '8px',
+                                cursor: messageText.trim() ? 'pointer' : 'not-allowed',
+                                fontWeight: 600,
+                                fontSize: '0.82rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.4rem',
+                                transition: 'all 0.15s',
+                                opacity: messageText.trim() ? 1 : 0.5,
+                            }}
+                        >
+                            <Send size={14} />
+                            Enviar
+                        </button>
                     </div>
-                )}
-                
-                {messageAcknowledged && (
-                    <div style={{
-                        marginTop: '0.5rem',
-                        padding: '0.4rem 0.75rem',
-                        background: 'rgba(52,211,153,0.08)',
-                        borderRadius: '6px',
-                        fontSize: '0.75rem',
-                        color: '#34d399',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.4rem',
-                    }}>
-                        <CheckCircle size={14} />
-                        Orador confirmou o recebimento da mensagem
-                    </div>
-                )}
+                </div>
             </div>
+            
+            {/* Opções de Resposta (até 4) */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingLeft: '3.25rem' }}>
+                <div style={{ fontSize: '0.72rem', color: '#6b7280', fontWeight: 500 }}>
+                    Opções de resposta (opcional - até 4):
+                </div>
+                {responseOptions.map((opt, idx) => (
+                    <div key={idx} style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                        <input
+                            type="text"
+                            value={opt}
+                            onChange={(e) => {
+                                const newOpts = [...responseOptions];
+                                newOpts[idx] = e.target.value;
+                                
+                                // Se preencheu e é o último (até 4), adiciona mais um campo
+                                if (e.target.value.trim() && idx === newOpts.length - 1 && newOpts.length < 4) {
+                                    newOpts.push('');
+                                }
+                                
+                                // Se limpou e não é o primeiro, remove campos vazios no final
+                                if (!e.target.value.trim() && idx < newOpts.length - 1) {
+                                    const cleaned = newOpts.filter((o, i) => o.trim() || i === 0);
+                                    setResponseOptions(cleaned.length > 0 ? cleaned : ['']);
+                                    return;
+                                }
+                                
+                                setResponseOptions(newOpts);
+                            }}
+                            placeholder={`Opção ${idx + 1}`}
+                            style={{
+                                flex: 1,
+                                padding: '0.45rem 0.65rem',
+                                background: 'rgba(255,255,255,0.02)',
+                                border: '1px solid rgba(255,255,255,0.06)',
+                                borderRadius: '6px',
+                                color: '#e1e4e8',
+                                fontSize: '0.78rem',
+                                outline: 'none',
+                            }}
+                        />
+                        {idx > 0 && (
+                            <button
+                                onClick={() => {
+                                    const newOpts = responseOptions.filter((_, i) => i !== idx);
+                                    setResponseOptions(newOpts.length > 0 ? newOpts : ['']);
+                                }}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: '#484f58',
+                                    cursor: 'pointer',
+                                    padding: '4px',
+                                }}
+                            >
+                                <X size={14} />
+                            </button>
+                        )}
+                    </div>
+                ))}
+            </div>
+            
+            {/* Status da mensagem */}
+            {sentMessage && !messageAcknowledged && (
+                <div style={{
+                    padding: '0.4rem 0.75rem',
+                    background: 'rgba(147,51,234,0.08)',
+                    borderRadius: '6px',
+                    fontSize: '0.75rem',
+                    color: '#a855f7',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    marginLeft: '3.25rem',
+                }}>
+                    <div style={{
+                        width: '6px', height: '6px',
+                        borderRadius: '50%',
+                        backgroundColor: '#a855f7',
+                        animation: 'pulse 1.5s infinite',
+                    }} />
+                    Mensagem enviada: "{sentMessage.text}" - Aguardando resposta...
+                </div>
+            )}
+            
+            {messageAcknowledged && (
+              <div style={{
+                  padding: '0.4rem 0.75rem',
+                  background: 'rgba(52,211,153,0.08)',
+                  borderRadius: '6px',
+                  fontSize: '0.75rem',
+                  color: '#34d399',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  marginLeft: '3.25rem',
+              }}>
+                  <CheckCircle size={14} />
+                  {selectedResponse && selectedResponse !== 'OK - Entendi' ? (
+                      <>Orador respondeu: "{selectedResponse}"</>
+                  ) : (
+                      <>Orador confirmou o recebimento da mensagem</>
+                  )}
+              </div>
+            )}
         </div>
 
         {/* Criar Nova Apresentação + Importar JW */}

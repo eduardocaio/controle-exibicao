@@ -110,7 +110,17 @@ function DisplayPage() {
     }}>
       {/* Prioridade 1: Imagem ativa (transmissão) */}
       {imageSrc ? (
-        <img src={imageSrc} alt="" style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain', pointerEvents:'none' }} />
+        <img 
+          src={imageSrc} 
+          alt="" 
+          style={{ 
+            width: '100%', 
+            height: '100%', 
+            objectFit: 'contain',
+            pointerEvents: 'none',
+            backgroundColor: '#000000'
+          }} 
+        />
       ) : countdownRunning && countdownSeconds > 0 ? (
         /* Prioridade 2: Cronômetro regressivo em tela cheia */
         <div style={{
@@ -209,7 +219,17 @@ function DisplayPage() {
         </div>
       ) : defaultImage ? (
         /* Prioridade 3: Imagem padrão (Texto do Ano) */
-        <img src={defaultImage} alt="Texto do Ano" style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain', pointerEvents:'none' }} />
+        <img 
+          src={defaultImage} 
+          alt="Texto do Ano" 
+          style={{ 
+            width: '100%', 
+            height: '100%', 
+            objectFit: 'contain', 
+            pointerEvents: 'none',
+            backgroundColor: '#000000'
+          }} 
+        />
       ) : (
         /* Prioridade 4: Tela preta */
         <div style={{ width:'100%', height:'100%', backgroundColor:'#000000' }} />
