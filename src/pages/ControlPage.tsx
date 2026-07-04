@@ -162,13 +162,6 @@ function ControlPage() {
     }
   };
 
-  const handleAcknowledgeMessage = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ action: 'acknowledge_message' }));
-        setOperatorMessage(null);
-    }
-  };
-
   const handleRequestWater = () => {
     if (connected) sendCommand('request_water');
   };
