@@ -111,6 +111,48 @@ pub struct AppState {
     pub operator_message: Option<OperatorMessage>,
     pub schedule_config: ScheduleConfig,
     pub countdown: CountdownState,
+    pub zoom_config: ZoomBotConfig,
+    pub zoom_state: ZoomBotState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoomBotConfig {
+    pub meeting_id: String,
+    pub passcode: String,
+    pub bot_name: String,
+}
+
+impl Default for ZoomBotConfig {
+    fn default() -> Self {
+        Self {
+            meeting_id: String::new(),
+            passcode: String::new(),
+            bot_name: "Ouvinte_Silencioso".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoomRaisedHand {
+    pub name: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoomBotState {
+    pub connected: bool,
+    pub raised_hands: Vec<ZoomRaisedHand>,
+    pub last_error: Option<String>,
+}
+
+impl Default for ZoomBotState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            raised_hands: Vec::new(),
+            last_error: None,
+        }
+    }
 }
 
 impl AppState {
@@ -136,6 +178,8 @@ impl AppState {
                 label: String::new(),
                 stopped_manually: false,
             },
+            zoom_config: ZoomBotConfig::default(),
+            zoom_state: ZoomBotState::default(),
         }
     }
 }

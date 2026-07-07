@@ -24,9 +24,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": [
-      "resources/texto-do-ano.jpg"
-    ],
+    "resources": {
+      "resources/texto-do-ano.jpg": "resources/texto-do-ano.jpg",
+      "resources/zoom_bot.py": "resources/zoom_bot.py"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

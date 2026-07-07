@@ -5,7 +5,7 @@ import {
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
   FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive,
-  QrCode
+  QrCode, Video, VideoOff, Users, UserPlus, UserMinus, RefreshCw
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
@@ -41,6 +41,11 @@ function AdminPage() {
   const [qrUrl, setQrUrl] = useState('');
   const [responseOptions, setResponseOptions] = useState<string[]>(['']);
   const [selectedResponse, setSelectedResponse] = useState<string | null>(null);
+  const [zoomConfig, setZoomConfig] = useState({ meeting_id: '', passcode: '', bot_name: 'Tribuna (Bot)' });
+  const [zoomConnected, setZoomConnected] = useState(false);
+  const [zoomHands, setZoomHands] = useState<{ name: string; timestamp: number }[]>([]);
+  const [zoomError, setZoomError] = useState<string | null>(null);
+  const [zoomLoading, setZoomLoading] = useState(false);
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
@@ -317,6 +322,134 @@ function AdminPage() {
       };
       init();
   }, []);
+
+  const loadZoomConfig = async () => {
+    try {
+      const config = JSON.parse(await invoke('zoom_get_config') as string);
+      setZoomConfig(config);
+      console.log('📋 Configuração Zoom carregada:', config);
+    } catch (e) { 
+      console.error('Erro ao carregar config Zoom:', e); 
+    }
+  };
+
+  useEffect(() => {
+    loadZoomConfig();
+    updateZoomState();
+  }, []);
+
+  useEffect(() => {
+    if (!showSettings) {
+      loadZoomConfig();
+    }
+  }, [showSettings]);
+
+  // Eventos do Zoom
+  useEffect(() => {
+    const unlistenConnected = listen('zoom-connected', () => {
+      setZoomConnected(true);
+      setZoomError(null);
+      setZoomLoading(false);
+      updateZoomState();
+    });
+    
+    const unlistenDisconnected = listen('zoom-disconnected', (_event: any) => {
+      setZoomConnected(false);
+      setZoomLoading(false);
+      updateZoomState();
+    });
+    
+    const unlistenHandRaised = listen('zoom-hand-raised', (event: any) => {
+      const { name, timestamp } = event.payload;
+      setZoomHands(prev => {
+        if (prev.some(h => h.name === name)) return prev;
+        return [...prev, { name, timestamp }];
+      });
+    });
+    
+    const unlistenHandLowered = listen('zoom-hand-lowered', (event: any) => {
+      const { name } = event.payload;
+      setZoomHands(prev => prev.filter(h => h.name !== name));
+    });
+    
+    const unlistenError = listen('zoom-error', (event: any) => {
+      setZoomError(event.payload);
+      setZoomConnected(false);
+      setZoomLoading(false);
+    });
+    
+    return () => {
+      unlistenConnected.then(fn => fn());
+      unlistenDisconnected.then(fn => fn());
+      unlistenHandRaised.then(fn => fn());
+      unlistenHandLowered.then(fn => fn());
+      unlistenError.then(fn => fn());
+    };
+  }, []);
+
+  const updateZoomState = async () => {
+    try {
+      const state = JSON.parse(await invoke('zoom_get_state') as string);
+      setZoomConnected(state.connected);
+      setZoomHands(state.raised_hands);
+      setZoomError(state.error);
+    } catch (e) { /* ignore */ }
+  };
+
+  const handleStartZoomBot = async () => {
+    console.log('🟢 Iniciando Zoom Bot...');
+    setZoomLoading(true);
+    setZoomError(null);
+    
+    try {
+      // Recarregar a config antes de iniciar
+      console.log('📋 Carregando configuração...');
+      const config = JSON.parse(await invoke('zoom_get_config') as string);
+      setZoomConfig(config);
+      console.log('📋 Config:', config);
+      
+      if (!config.meeting_id || !config.passcode) {
+        const msg = 'Configure o ID e senha da reunião nas Configurações';
+        console.error('❌', msg);
+        setZoomError(msg);
+        setZoomLoading(false);
+        return;
+      }
+      
+      console.log('▶️ Chamando zoom_start_bot...');
+      await invoke('zoom_start_bot');
+      console.log('✅ zoom_start_bot executado com sucesso');
+      
+    } catch (e: any) {
+      console.error('❌ Erro ao iniciar bot:', e);
+      setZoomError(e.message || 'Erro ao iniciar bot');
+      setZoomLoading(false);
+    }
+  };
+
+  const handleStopZoomBot = async () => {
+    setZoomLoading(true);
+    try {
+      await invoke('zoom_stop_bot');
+      setZoomConnected(false);
+      setZoomHands([]);
+    } catch (e: any) {
+      setZoomError(e.message || 'Erro ao parar bot');
+    }
+    setZoomLoading(false);
+  };
+
+
+
+  const handleTestZoomConfig = async () => {
+    try {
+      const config = JSON.parse(await invoke('zoom_get_config') as string);
+      console.log('📋 Configuração atual:', config);
+      alert(`Configuração atual:\nID: ${config.meeting_id || 'Não configurado'}\nNome: ${config.bot_name}`);
+    } catch (e: any) {
+      alert('Erro ao ler config: ' + e.message);
+    }
+  };
 
   if (showSettings) {
     return <div style={{ minHeight:'100vh', padding:'2rem', background:'#0b0e11' }}><SettingsPage onBack={() => setShowSettings(false)} /></div>;
@@ -724,6 +857,239 @@ function AdminPage() {
             <span>Nenhuma apresentação ativa. Ative uma apresentação para poder exibir imagens no tablet.</span>
           </div>
         )}
+
+        {/* Painel do Zoom Bot - versão corrigida */}
+        <div style={{
+          background: 'linear-gradient(135deg, #111820 0%, #1a1f2e 100%)',
+          borderRadius: '16px',
+          padding: '1rem 1.5rem',
+          marginBottom: '1rem',
+          border: `1px solid ${zoomConnected ? 'rgba(52,211,153,0.3)' : 'rgba(255,255,255,0.04)'}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <div style={{
+                width: '36px', height: '36px', borderRadius: '10px',
+                background: zoomConnected ? 'rgba(52,211,153,0.15)' : 'rgba(255,255,255,0.04)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                {zoomConnected ? <Video size={18} color="#34d399" /> : <VideoOff size={18} color="#484f58" />}
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#e1e4e8' }}>
+                    Zoom Bot
+                  </span>
+                  <span style={{
+                    width: '8px', height: '8px', borderRadius: '50%',
+                    background: zoomConnected ? '#34d399' : zoomError ? '#ef4444' : '#484f58',
+                    boxShadow: zoomConnected ? '0 0 12px rgba(52,211,153,0.5)' : 'none',
+                    animation: zoomConnected ? 'pulse 2s infinite' : 'none',
+                  }} />
+                  <span style={{ fontSize: '0.7rem', color: zoomConnected ? '#34d399' : zoomError ? '#ef4444' : '#484f58', fontWeight: 600 }}>
+                    {zoomConnected ? 'Conectado' : zoomError ? 'Erro' : 'Desconectado'}
+                  </span>
+                </div>
+                {zoomError && (
+                  <p style={{ margin: '2px 0 0', fontSize: '0.7rem', color: '#ef4444' }}>
+                    {zoomError}
+                  </p>
+                )}
+                {/* Mostrar configuração atual */}
+                <p style={{ margin: '2px 0 0', fontSize: '0.65rem', color: '#484f58' }}>
+                  ID: {zoomConfig.meeting_id || 'Não configurado'} | Bot: {zoomConfig.bot_name}
+                </p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              {/* Mãos levantadas - contador visual */}
+              {zoomConnected && zoomHands.length > 0 && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                  padding: '0.25rem 0.75rem',
+                  background: 'rgba(245,158,11,0.12)',
+                  borderRadius: '20px',
+                  border: '1px solid rgba(245,158,11,0.2)',
+                }}>
+                  <UserPlus size={14} color="#fbbf24" />
+                  <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fbbf24' }}>
+                    {zoomHands.length}
+                  </span>
+                </div>
+              )}
+
+              {zoomConnected ? (
+                <button
+                  onClick={handleStopZoomBot}
+                  disabled={zoomLoading}
+                  style={{
+                    padding: '0.4rem 1rem',
+                    background: 'rgba(239,68,68,0.1)',
+                    color: '#ef4444',
+                    border: '1px solid rgba(239,68,68,0.2)',
+                    borderRadius: '8px',
+                    cursor: zoomLoading ? 'wait' : 'pointer',
+                    fontWeight: 600,
+                    fontSize: '0.75rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => {
+                    if (!zoomLoading) e.currentTarget.style.background = 'rgba(239,68,68,0.2)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'rgba(239,68,68,0.1)';
+                  }}
+                >
+                  <VideoOff size={14} />
+                  {zoomLoading ? 'Parando...' : 'Parar'}
+                </button>
+              ) : (
+                <button
+                  onClick={handleStartZoomBot}
+                  disabled={zoomLoading || !zoomConfig.meeting_id || !zoomConfig.passcode}
+                  style={{
+                    padding: '0.4rem 1rem',
+                    background: (!zoomConfig.meeting_id || !zoomConfig.passcode) 
+                      ? 'rgba(255,255,255,0.03)' 
+                      : 'rgba(52,211,153,0.12)',
+                    color: (!zoomConfig.meeting_id || !zoomConfig.passcode) 
+                      ? '#484f58' 
+                      : '#34d399',
+                    border: '1px solid ' + ((!zoomConfig.meeting_id || !zoomConfig.passcode) 
+                      ? 'rgba(255,255,255,0.04)' 
+                      : 'rgba(52,211,153,0.25)'),
+                    borderRadius: '8px',
+                    cursor: (zoomLoading || !zoomConfig.meeting_id || !zoomConfig.passcode) 
+                      ? 'not-allowed' 
+                      : 'pointer',
+                    fontWeight: 600,
+                    fontSize: '0.75rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    transition: 'all 0.15s',
+                    opacity: (zoomLoading || !zoomConfig.meeting_id || !zoomConfig.passcode) ? 0.5 : 1,
+                  }}
+                  onMouseEnter={e => {
+                    if (!zoomLoading && zoomConfig.meeting_id && zoomConfig.passcode) {
+                      e.currentTarget.style.background = 'rgba(52,211,153,0.2)';
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'rgba(52,211,153,0.12)';
+                  }}
+                >
+                  <Video size={14} />
+                  {zoomLoading ? 'Conectando...' : 'Conectar Zoom'}
+                </button>
+              )}
+
+              <button
+                onClick={handleTestZoomConfig}
+                style={{
+                  padding: '0.4rem',
+                  background: 'rgba(59,130,246,0.1)',
+                  color: '#60a5fa',
+                  border: '1px solid rgba(59,130,246,0.2)',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.15s',
+                }}
+                title="Testar configuração"
+              >
+                <RefreshCw size={14} />
+              </button>
+
+              <button
+                onClick={() => setShowSettings(true)}
+                style={{
+                  padding: '0.4rem',
+                  background: 'rgba(255,255,255,0.03)',
+                  color: '#8b949e',
+                  border: '1px solid rgba(255,255,255,0.04)',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.15s',
+                }}
+                title="Configurar Zoom (Settings)"
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                  e.currentTarget.style.color = '#e1e4e8';
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                  e.currentTarget.style.color = '#8b949e';
+                }}
+              >
+                <Users size={14} />
+              </button>
+            </div>
+          </div>
+
+          {/* Lista de mãos levantadas - estilo visual agradável */}
+          {zoomConnected && zoomHands.length > 0 && (
+            <div style={{
+              marginTop: '0.75rem',
+              paddingTop: '0.75rem',
+              borderTop: '1px solid rgba(255,255,255,0.04)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
+            }}>
+              <span style={{ fontSize: '0.7rem', color: '#8b949e', fontWeight: 600, width: '100%', marginBottom: '0.2rem' }}>
+                🙋 Mãos levantadas:
+              </span>
+              {zoomHands.map((hand, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: '0.3rem 0.7rem',
+                    background: 'rgba(245,158,11,0.08)',
+                    borderRadius: '20px',
+                    border: '1px solid rgba(245,158,11,0.15)',
+                    animation: 'fadeIn 0.3s ease',
+                  }}
+                >
+                  <UserPlus size={12} color="#fbbf24" />
+                  <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fbbf24' }}>
+                    {hand.name}
+                  </span>
+                  <span style={{ fontSize: '0.6rem', color: '#8b949e' }}>
+                    {new Date(hand.timestamp * 1000).toLocaleTimeString()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Configuração resumida */}
+          {!zoomConnected && !zoomError && (
+            <div style={{
+              marginTop: '0.5rem',
+              fontSize: '0.7rem',
+              color: '#484f58',
+              display: 'flex',
+              gap: '1rem',
+              flexWrap: 'wrap',
+            }}>
+              <span>ID: {zoomConfig.meeting_id || 'Não configurado'}</span>
+              <span>Bot: {zoomConfig.bot_name || 'Ouvinte_Silencioso'}</span>
+            </div>
+          )}
+        </div>
 
         {/* Lista de Apresentações */}
         {presentations.length === 0 ? (

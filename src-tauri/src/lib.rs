@@ -1,6 +1,6 @@
 mod state;
 
-use state::{AppState, SharedState, Slide, WaterRequest, IndicatorRequest, OperatorMessage, Presentation, ScheduleConfig, MeetingTime};
+use state::*;
 use std::fs;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -24,6 +24,11 @@ use std::collections::HashMap;
 use chrono::Timelike;
 use local_ip_address::local_ip;
 use warp::Buf;
+use tokio::io::{BufReader, AsyncBufReadExt};
+use tokio::time::timeout;
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex as TokioMutex;
 
 // Estrutura para gerenciar conexões WebSocket
 struct WsClients {
@@ -55,6 +60,28 @@ impl WsClients {
     fn add(&self, sender: tokio::sync::mpsc::UnboundedSender<String>) {
         if let Ok(mut senders) = self.senders.lock() {
             senders.push(sender);
+        }
+    }
+}
+
+pub struct ZoomBotProcess {
+    pub process: Arc<TokioMutex<Option<tokio::process::Child>>>,
+    pub connected: Arc<AtomicBool>,
+    pub raised_hands: Arc<TokioMutex<Vec<ZoomRaisedHand>>>,
+    pub error: Arc<TokioMutex<Option<String>>>,
+    pub config: Arc<TokioMutex<ZoomBotConfig>>,
+    pub should_stop: Arc<AtomicBool>,
+}
+
+impl ZoomBotProcess {
+    pub fn new() -> Self {
+        Self {
+            process: Arc::new(TokioMutex::new(None)),
+            connected: Arc::new(AtomicBool::new(false)),
+            raised_hands: Arc::new(TokioMutex::new(Vec::new())),
+            error: Arc::new(TokioMutex::new(None)),
+            config: Arc::new(TokioMutex::new(ZoomBotConfig::default())),
+            should_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -2113,6 +2140,507 @@ fn start_upload_server(
     });
 }
 
+#[tauri::command]
+async fn zoom_get_config(state: tauri::State<'_, SharedState>) -> Result<String, String> {
+    let app_state = state.read().await;
+    serde_json::to_string(&app_state.zoom_config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn zoom_save_config(
+    config_json: String,
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let config: ZoomBotConfig = serde_json::from_str(&config_json)
+        .map_err(|e| format!("Erro ao parsear config: {}", e))?;
+    let mut app_state = state.write().await;
+    app_state.zoom_config = config;
+    save_state_to_disk(&app_state, &app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn zoom_start_bot(
+    state: tauri::State<'_, SharedState>,
+    app_handle: tauri::AppHandle,
+    zoom_bot: tauri::State<'_, Arc<ZoomBotProcess>>,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+    
+    println!("🟢 zoom_start_bot: Iniciando...");
+    
+    // Verificar se já está rodando
+    {
+        let process = zoom_bot.process.lock().await;
+        if process.is_some() {
+            println!("⚠️ Bot já está em execução");
+            return Err("Bot já está em execução".to_string());
+        }
+    }
+    
+    // Limpar estado anterior
+    zoom_bot.should_stop.store(false, Ordering::SeqCst);
+    zoom_bot.connected.store(false, Ordering::SeqCst);
+    *zoom_bot.error.lock().await = None;
+    *zoom_bot.raised_hands.lock().await = Vec::new();
+    
+    // Obter configuração
+    let config = {
+        let app_state = state.read().await;
+        app_state.zoom_config.clone()
+    };
+    
+    println!("📋 Configuração carregada: meeting_id={}, passcode=****, bot_name={}", 
+        config.meeting_id, config.bot_name);
+    
+    if config.meeting_id.is_empty() || config.passcode.is_empty() {
+        println!("❌ Configuração incompleta");
+        return Err("Configure o ID da reunião e senha primeiro".to_string());
+    }
+    
+    *zoom_bot.config.lock().await = config.clone();
+    
+    // ===== VERIFICAR PYTHON =====
+    println!("🔍 Verificando Python...");
+    
+    let python_commands = vec!["py", "python", "python3"];
+    let mut python_cmd = None;
+    
+    for cmd in &python_commands {
+        let check = tokio::process::Command::new(cmd)
+            .arg("--version")
+            .output()
+            .await;
+        
+        if check.is_ok() {
+            python_cmd = Some(cmd.to_string());
+            println!("✅ Python encontrado via '{}'", cmd);
+            break;
+        }
+    }
+    
+    let python_cmd = match python_cmd {
+        Some(cmd) => cmd,
+        None => {
+            let err = "Python não encontrado. Instale o Python 3.8+ e adicione ao PATH".to_string();
+            println!("❌ {}", err);
+            return Err(err);
+        }
+    };
+    
+    let python_executable = python_cmd.clone();
+    
+    // ===== VERIFICAR PLAYWRIGHT =====
+    println!("🔍 Verificando Playwright...");
+    let playwright_check = tokio::process::Command::new(&python_executable)
+        .args(&["-c", "import playwright"])
+        .output()
+        .await;
+    
+    if playwright_check.is_err() {
+        println!("⚠️ Playwright não encontrado. Instalando...");
+        let install = tokio::process::Command::new(&python_executable)
+            .args(&["-m", "pip", "install", "playwright"])
+            .output()
+            .await;
+        
+        if let Ok(output) = install {
+            println!("📦 Playwright instalado: {}", String::from_utf8_lossy(&output.stdout));
+        } else {
+            let err = "Falha ao instalar playwright".to_string();
+            println!("❌ {}", err);
+            return Err(err);
+        }
+    }
+    
+    // ===== INSTALAR CHROMIUM =====
+    println!("🔍 Instalando/atualizando Chromium...");
+    let chromium_install = tokio::process::Command::new(&python_executable)
+        .args(&["-m", "playwright", "install", "chromium"])
+        .output()
+        .await;
+    
+    if let Ok(output) = chromium_install {
+        println!("📦 Chromium instalado: {}", String::from_utf8_lossy(&output.stdout));
+    } else {
+        println!("⚠️ Aviso: erro ao instalar Chromium, tentando continuar...");
+    }
+    println!("✅ Playwright e Chromium OK");
+    
+    // ===== CRIAR SCRIPT PYTHON =====
+    let data_dir = get_data_dir(&app_handle);
+    let scripts_dir = data_dir.join("scripts");
+    fs::create_dir_all(&scripts_dir).map_err(|e| {
+        let err = format!("Erro ao criar diretório scripts: {}", e);
+        println!("❌ {}", err);
+        err
+    })?;
+    
+    let script_path = scripts_dir.join("zoom_bot.py");
+    println!("📁 Script path: {:?}", script_path);
+    
+    // Extrair o script do binário
+    let script_content = include_str!("../resources/zoom_bot.py");
+    if script_content.is_empty() {
+        let err = "Script do bot não encontrado no binário".to_string();
+        println!("❌ {}", err);
+        return Err(err);
+    }
+    
+    fs::write(&script_path, script_content).map_err(|e| {
+        let err = format!("Erro ao criar script: {}", e);
+        println!("❌ {}", err);
+        err
+    })?;
+    
+    if !script_path.exists() {
+        let err = "Falha ao criar o script do bot".to_string();
+        println!("❌ {}", err);
+        return Err(err);
+    }
+    println!("✅ Script criado com sucesso");
+    
+    // ===== CONSTRUIR COMANDO =====
+    let use_visible = false; // Mude para true para debug
+    
+    let mut cmd = tokio::process::Command::new(&python_executable);
+    cmd.arg(&script_path);
+    cmd.arg("--meeting").arg(&config.meeting_id);
+    cmd.arg("--passcode").arg(&config.passcode);
+    cmd.arg("--name").arg(&config.bot_name);
+    
+    if use_visible {
+        cmd.arg("--visible");
+        println!("👁️ Modo VISÍVEL (debug)");
+    } else {
+        cmd.arg("--headless");
+        println!("👻 Modo HEADLESS");
+    }
+    
+    // Definir diretório de trabalho
+    if let Some(parent) = script_path.parent() {
+        cmd.current_dir(parent);
+        println!("📂 Diretório de trabalho: {:?}", parent);
+    }
+    
+    cmd.stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::piped());
+    
+    // ===== VARIÁVEIS DE AMBIENTE =====
+    cmd.env("PLAYWRIGHT_BROWSERS_PATH", "0");
+    cmd.env("PYTHONUNBUFFERED", "1");
+    cmd.env("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "0");
+    
+    // Copiar PATH do sistema
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+        println!("📌 PATH copiado do sistema");
+    }
+    
+    // Adicionar diretório do script ao PATH
+    if let Some(parent) = script_path.parent() {
+        if let Some(parent_str) = parent.to_str() {
+            if let Ok(current_path) = std::env::var("PATH") {
+                let new_path = format!("{};{}", parent_str, current_path);
+                cmd.env("PATH", new_path);
+                println!("📌 PATH atualizado com: {}", parent_str);
+            }
+        }
+    }
+    
+    println!("▶️ Executando: {} {} --meeting {} --name {}",
+        python_executable, script_path.display(), config.meeting_id, config.bot_name);
+    
+    // ===== INICIAR PROCESSO =====
+    let mut child = match cmd.spawn() {
+        Ok(c) => {
+            println!("✅ Processo iniciado com PID: {:?}", c.id());
+            c
+        },
+        Err(e) => {
+            let err = format!("Erro ao iniciar bot: {}", e);
+            println!("❌ {}", err);
+            return Err(err);
+        }
+    };
+    
+    // ===== CAPTURAR SAÍDA INICIAL =====
+    println!("⏳ Aguardando 3 segundos para capturar saída inicial...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    
+    // Tentar ler stdout
+    if let Some(mut stdout) = child.stdout.take() {
+        let mut buf = [0u8; 4096];
+        match tokio::time::timeout(Duration::from_millis(1000), stdout.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                let output = String::from_utf8_lossy(&buf[..n]);
+                println!("[Zoom Bot stdout inicial] {}", output);
+            }
+            Ok(Ok(_)) => println!("[Zoom Bot stdout] Nenhuma saída inicial"),
+            Ok(Err(e)) => println!("[Zoom Bot stdout] Erro ao ler: {}", e),
+            Err(_) => println!("[Zoom Bot stdout] Timeout ao ler"),
+        }
+        child.stdout = Some(stdout);
+    }
+    
+    // Tentar ler stderr
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = [0u8; 4096];
+        match tokio::time::timeout(Duration::from_millis(1000), stderr.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                let output = String::from_utf8_lossy(&buf[..n]);
+                println!("[Zoom Bot stderr inicial] {}", output);
+            }
+            Ok(Ok(_)) => println!("[Zoom Bot stderr] Nenhuma saída inicial"),
+            Ok(Err(e)) => println!("[Zoom Bot stderr] Erro ao ler: {}", e),
+            Err(_) => println!("[Zoom Bot stderr] Timeout ao ler"),
+        }
+        child.stderr = Some(stderr);
+    }
+    
+    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+    
+    // ===== CLONAR ARCs =====
+    let process_arc = zoom_bot.process.clone();
+    let connected_arc = zoom_bot.connected.clone();
+    let raised_hands_arc = zoom_bot.raised_hands.clone();
+    let error_arc = zoom_bot.error.clone();
+    let should_stop_arc = zoom_bot.should_stop.clone();
+    let handle = app_handle.clone();
+    let ws_clients_inner = ws_clients.inner().clone();
+    
+    // Armazenar o processo
+    *zoom_bot.process.lock().await = Some(child);
+    
+    // ===== TASK PARA MONITORAR STDOUT =====
+    let should_stop_stdout = should_stop_arc.clone();
+    let connected_stdout = connected_arc.clone();
+    let raised_hands_stdout = raised_hands_arc.clone();
+    let error_stdout = error_arc.clone();
+    let handle_stdout = handle.clone();
+    let ws_clients_stdout = ws_clients_inner.clone();
+    
+    let _handle_stdout = tauri::async_runtime::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut reconnection_attempts = 0;
+        const MAX_RECONNECTION_ATTEMPTS: u32 = 5;
+        
+        while let Ok(Some(line)) = lines.next_line().await {
+            if should_stop_stdout.load(Ordering::SeqCst) {
+                break;
+            }
+            
+            println!("[Zoom Bot stdout] {}", line);
+            
+            // ===== DETECTAR CONEXÃO BEM SUCEDIDA =====
+            if line.contains("Login inicial bem sucedido!") 
+                || line.contains("Reconectado com sucesso!") {
+                connected_stdout.store(true, Ordering::SeqCst);
+                *error_stdout.lock().await = None;
+                reconnection_attempts = 0;
+                let _ = handle_stdout.emit("zoom-connected", true);
+                
+                // ✅ ENVIAR VIA WEBSOCKET
+                let ws_msg = serde_json::json!({
+                    "type": "zoom_connected",
+                }).to_string();
+                ws_clients_stdout.broadcast(ws_msg);
+                println!("📡 Evento zoom_connected enviado via WebSocket");
+            }
+            
+            // ===== DETECTAR CONEXÃO PERDIDA =====
+            if line.contains("CONEXAO PERDIDA!") {
+                connected_stdout.store(false, Ordering::SeqCst);
+                reconnection_attempts += 1;
+                let _ = handle_stdout.emit("zoom-disconnected", "Conexão perdida");
+                
+                // ✅ ENVIAR VIA WEBSOCKET
+                let ws_msg = serde_json::json!({
+                    "type": "zoom_disconnected",
+                }).to_string();
+                ws_clients_stdout.broadcast(ws_msg);
+                println!("📡 Evento zoom_disconnected enviado via WebSocket");
+                
+                if reconnection_attempts >= MAX_RECONNECTION_ATTEMPTS {
+                    let _ = handle_stdout.emit("zoom-error", 
+                        format!("Falha após {} tentativas de reconexão. Bot encerrado.", reconnection_attempts)
+                    );
+                    should_stop_stdout.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            
+            // ===== DETECTAR MÃO LEVANTADA =====
+            if line.contains("MAO LEVANTADA:") {
+                if let Some(name) = line.split("MAO LEVANTADA:").nth(1) {
+                    let name = name.trim().to_string();
+                    let name = name.split('[').next().unwrap_or(&name).trim().to_string();
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    
+                    let mut hands = raised_hands_stdout.lock().await;
+                    if !hands.iter().any(|h| h.name == name) {
+                        hands.push(ZoomRaisedHand { name: name.clone(), timestamp });
+                        
+                        let _ = handle_stdout.emit("zoom-hand-raised", &serde_json::json!({
+                            "name": name,
+                            "timestamp": timestamp
+                        }));
+                        println!("✋ Mão levantada: {}", name);
+                        
+                        // ✅ ENVIAR VIA WEBSOCKET
+                        let ws_msg = serde_json::json!({
+                            "type": "zoom_hand_raised",
+                            "name": name,
+                            "timestamp": timestamp
+                        }).to_string();
+                        ws_clients_stdout.broadcast(ws_msg);
+                        println!("📡 Evento zoom_hand_raised enviado via WebSocket: {}", name);
+                    }
+                }
+            }
+            
+            // ===== DETECTAR MÃO ABAIXADA =====
+            if line.contains("MAO ABAIXADA:") {
+                if let Some(name) = line.split("MAO ABAIXADA:").nth(1) {
+                    let name = name.trim().to_string();
+                    let name = name.split('[').next().unwrap_or(&name).trim().to_string();
+                    let mut hands = raised_hands_stdout.lock().await;
+                    hands.retain(|h| h.name != name);
+                    
+                    let _ = handle_stdout.emit("zoom-hand-lowered", &serde_json::json!({
+                        "name": name
+                    }));
+                    println!("👇 Mão abaixada: {}", name);
+                    
+                    // ✅ ENVIAR VIA WEBSOCKET
+                    let ws_msg = serde_json::json!({
+                        "type": "zoom_hand_lowered",
+                        "name": name
+                    }).to_string();
+                    ws_clients_stdout.broadcast(ws_msg);
+                    println!("📡 Evento zoom_hand_lowered enviado via WebSocket: {}", name);
+                }
+            }
+            
+            // ===== DETECTAR ERRO FATAL =====
+            if line.contains("[Bot] Falha no login") 
+                || line.contains("[Bot] Erro:") 
+                || line.contains("[Bot] Numero maximo de reconexoes") {
+                connected_stdout.store(false, Ordering::SeqCst);
+                let error_msg = line.clone();
+                *error_stdout.lock().await = Some(error_msg.clone());
+                let _ = handle_stdout.emit("zoom-error", &error_msg);
+                println!("❌ Erro detectado: {}", error_msg);
+                should_stop_stdout.store(true, Ordering::SeqCst);
+                break;
+            }
+            
+            // ===== VERIFICAR SE O BOT FOI ENCERRADO =====
+            if line.contains("[Bot] Encerrado") || line.contains("[Bot] Interrompido") {
+                connected_stdout.store(false, Ordering::SeqCst);
+                should_stop_stdout.store(true, Ordering::SeqCst);
+                let _ = handle_stdout.emit("zoom-disconnected", "Bot encerrado");
+                println!("🔴 Bot encerrado");
+                break;
+            }
+        }
+        
+        connected_stdout.store(false, Ordering::SeqCst);
+        should_stop_stdout.store(true, Ordering::SeqCst);
+        let _ = handle_stdout.emit("zoom-disconnected", "Bot finalizado");
+        println!("🔴 Task stdout finalizada");
+    });
+    
+    // ===== TASK PARA MONITORAR STDERR =====
+    let should_stop_stderr = should_stop_arc.clone();
+    let handle_stderr_emit = handle.clone();
+    
+    let _handle_stderr = tauri::async_runtime::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if should_stop_stderr.load(Ordering::SeqCst) {
+                break;
+            }
+            println!("[Zoom Bot stderr] {}", line);
+            
+            if line.contains("Traceback") || line.contains("Error:") || line.contains("ModuleNotFoundError") {
+                let _ = handle_stderr_emit.emit("zoom-error", &format!("Erro no Python: {}", line));
+                println!("❌ Erro no Python: {}", line);
+                should_stop_stderr.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+        println!("🔴 Task stderr finalizada");
+    });
+    
+    // ===== TASK PARA MONITORAR O PROCESSO (SEM TIMEOUT) =====
+    let process_arc_clone = process_arc.clone();
+    let should_stop_clone = should_stop_arc.clone();
+    let connected_clone = connected_arc.clone();
+    let handle_clone = handle.clone();
+    
+    tauri::async_runtime::spawn(async move {
+        let mut process = process_arc_clone.lock().await;
+        if let Some(mut child) = process.take() {
+            drop(process);
+            let status = child.wait().await;
+            connected_clone.store(false, Ordering::SeqCst);
+            should_stop_clone.store(true, Ordering::SeqCst);
+            let _ = handle_clone.emit("zoom-disconnected", "Processo do bot encerrado");
+            println!("🔴 Processo do bot encerrado com status: {:?}", status);
+        }
+    });
+    
+    println!("✅ zoom_start_bot concluído com sucesso!");
+    Ok(())
+}
+
+#[tauri::command]
+async fn zoom_stop_bot(
+    zoom_bot: tauri::State<'_, Arc<ZoomBotProcess>>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    zoom_bot.should_stop.store(true, Ordering::SeqCst);
+    
+    let mut process = zoom_bot.process.lock().await;
+    if let Some(mut child) = process.take() {  
+        let _ = child.kill().await;
+        let _ = timeout(Duration::from_secs(3), child.wait()).await;
+    }
+    
+    zoom_bot.connected.store(false, Ordering::SeqCst);
+    *zoom_bot.raised_hands.lock().await = Vec::new();
+    *zoom_bot.error.lock().await = None;
+    
+    let _ = app_handle.emit("zoom-disconnected", "Bot parado manualmente");
+    Ok(())
+}
+
+#[tauri::command]
+async fn zoom_get_state(
+    zoom_bot: tauri::State<'_, Arc<ZoomBotProcess>>,
+) -> Result<String, String> {
+    let connected = zoom_bot.connected.load(Ordering::SeqCst);
+    let hands = zoom_bot.raised_hands.lock().await;
+    let error = zoom_bot.error.lock().await;
+    
+    let state = serde_json::json!({
+        "connected": connected,
+        "raised_hands": *hands,
+        "error": *error,
+    });
+    
+    Ok(state.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -2133,7 +2661,9 @@ pub fn run() {
             let shared_state: SharedState = Arc::new(RwLock::new(state)); // PRIMEIRO
             let clients = Arc::new(WsClients::new()); // PRIMEIRO
             let upload_sessions = Arc::new(UploadSessions::new()); // PRIMEIRO
-            
+            let zoom_bot = Arc::new(ZoomBotProcess::new());
+
+            app.manage(zoom_bot.clone()); 
             app.manage(shared_state.clone());
             app.manage(clients.clone());
             app.manage(upload_sessions.clone());
@@ -2198,6 +2728,7 @@ pub fn run() {
             upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
             extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
             get_countdown_state, stop_countdown, ensure_display_window, generate_upload_qr,
+            zoom_get_config, zoom_save_config, zoom_start_bot, zoom_stop_bot, zoom_get_state
         ])
         .run(tauri::generate_context!())
         .expect("erro");

@@ -1,6 +1,6 @@
-// ControlPage.tsx
 import { useState, useEffect, useRef } from 'react';
-import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X } from 'lucide-react';
 
 function ControlPage() {
   const [slides, setSlides] = useState<any[]>([]);
@@ -16,6 +16,10 @@ function ControlPage() {
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  
+  // ===== Sistema de notificações =====
+  const [notifications, setNotifications] = useState<{ id: string; name: string; timestamp: number }[]>([]);
+  const notificationIdCounter = useRef(0);
 
   useEffect(() => {
     const handleResize = () => {
@@ -71,6 +75,7 @@ function ControlPage() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log('📨 Mensagem WebSocket recebida:', data.type);
           
           if (data.type === 'state') {
             const newSlides = data.slides || [];
@@ -118,8 +123,27 @@ function ControlPage() {
           if (data.type === 'message_acknowledged') {
             setOperatorMessage(null);
           }
+
+          // ===== EVENTOS DO ZOOM VIA WEBSOCKET =====
+          if (data.type === 'zoom_hand_raised') {
+            console.log('✋ Mão levantada via WebSocket:', data.name);
+            const { name, timestamp } = data;
+            
+            const id = Date.now() + '-' + (notificationIdCounter.current++);
+            
+            setNotifications(prev => {
+              if (prev.some(n => n.name === name)) return prev;
+              return [...prev, { id, name, timestamp }];
+            });
+          }
+          
+          if (data.type === 'zoom_hand_lowered') {
+            console.log('👇 Mão abaixada via WebSocket:', data.name);
+            setNotifications(prev => prev.filter(n => n.name !== data.name));
+          }
+          
         } catch (e) { 
-          console.error('Erro ao processar mensagem:', e); 
+          console.error('❌ Erro ao processar mensagem:', e); 
         }
       };
 
@@ -129,8 +153,8 @@ function ControlPage() {
         setTimeout(connect, 3000); 
       };
       
-      ws.onerror = () => {
-        console.error('❌ Erro na conexão WebSocket');
+      ws.onerror = (error) => {
+        console.error('❌ Erro na conexão WebSocket:', error);
       };
       
       wsRef.current = ws;
@@ -654,6 +678,117 @@ function ControlPage() {
         )}
       </div>
 
+      {/* ===== NOTIFICAÇÕES DE MÃOS LEVANTADAS - MAIORES E FIXAS ===== */}
+      {notifications.length > 0 && (
+        <div style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '1rem',
+          zIndex: 1000,
+          width: '100%',
+          maxWidth: '600px',
+          padding: '1rem',
+          pointerEvents: 'none',
+        }}>
+          {notifications.map((notif) => (
+            <div
+              key={notif.id}
+              style={{
+                background: 'linear-gradient(135deg, rgba(245,158,11,0.95) 0%, rgba(245,158,11,0.85) 100%)',
+                backdropFilter: 'blur(20px)',
+                borderRadius: '20px',
+                padding: '1.5rem 2rem',
+                boxShadow: '0 20px 60px rgba(245,158,11,0.4), 0 0 40px rgba(245,158,11,0.2), 0 4px 12px rgba(0,0,0,0.3)',
+                border: '2px solid rgba(255,255,255,0.2)',
+                animation: 'zoomIn 0.4s ease',
+                pointerEvents: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '1.25rem',
+                width: '100%',
+                maxWidth: '500px',
+              }}
+            >
+              <div style={{
+                width: '64px',
+                height: '64px',
+                borderRadius: '50%',
+                background: 'rgba(255,255,255,0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                animation: 'pulse 2s infinite',
+              }}>
+                <UserPlus size={32} color="#fff" />
+              </div>
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ 
+                  fontSize: '0.9rem', 
+                  fontWeight: 600, 
+                  color: 'rgba(255,255,255,0.8)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}>
+                  🙋 Mão levantada
+                </div>
+                <div style={{ 
+                  fontSize: '2.2rem', 
+                  fontWeight: 800, 
+                  color: '#fff',
+                  textShadow: '0 2px 10px rgba(0,0,0,0.3)',
+                  lineHeight: 1.2,
+                  marginTop: '0.2rem',
+                }}>
+                  {notif.name}
+                </div>
+                <div style={{ 
+                  fontSize: '0.7rem', 
+                  color: 'rgba(255,255,255,0.6)',
+                  marginTop: '0.3rem',
+                }}>
+                  {new Date(notif.timestamp * 1000).toLocaleTimeString()}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setNotifications(prev => prev.filter(n => n.id !== notif.id));
+                }}
+                style={{
+                  background: 'rgba(255,255,255,0.15)',
+                  border: 'none',
+                  borderRadius: '50%',
+                  width: '36px',
+                  height: '36px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.7)',
+                  transition: 'all 0.15s',
+                  flexShrink: 0,
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.25)';
+                  e.currentTarget.style.color = '#fff';
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.15)';
+                  e.currentTarget.style.color = 'rgba(255,255,255,0.7)';
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Mensagens de feedback */}
       {showSentMessage && (
         <div style={{
@@ -708,7 +843,7 @@ function ControlPage() {
               </p>
             </div>
             
-            {/* ✅ Opções de resposta */}
+            {/* Opções de resposta */}
             {operatorMessage.response_options && operatorMessage.response_options.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '0.5rem' }}>
                 {operatorMessage.response_options.map((option: string, idx: number) => (
@@ -752,7 +887,7 @@ function ControlPage() {
               </div>
             )}
             
-            {/* Botão OK padrão (se não houver opções) */}
+            {/* Botão OK padrão */}
             {(!operatorMessage.response_options || operatorMessage.response_options.length === 0) && (
               <button onClick={() => {
                 const ws = wsRef.current;
@@ -776,10 +911,17 @@ function ControlPage() {
 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @keyframes pulse { 
+          0%, 100% { opacity: 1; } 
+          50% { opacity: 0.8; transform: scale(1.05); } 
+        }
         @keyframes fadeInUp { from { opacity: 0; transform: translate(-50%, -40%); } to { opacity: 1; transform: translate(-50%, -50%); } }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes zoomIn { 
+          from { opacity: 0; transform: scale(0.8); } 
+          to { opacity: 1; transform: scale(1); } 
+        }
         * { -webkit-tap-highlight-color: transparent; }
       `}</style>
     </div>

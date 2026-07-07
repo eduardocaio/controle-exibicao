@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { ChevronLeft, Upload, Check, Image, RotateCcw, Clock, X, Plus } from 'lucide-react';
+import { ChevronLeft, Upload, Check, Image, RotateCcw, Clock, X, Plus, Video } from 'lucide-react';
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -17,6 +17,29 @@ function SettingsPage({ onBack }: SettingsPageProps) {
   const [scheduleConfig, setScheduleConfig] = useState<any>(null);
   const [newTime, setNewTime] = useState({ hour: 19, minute: 30 });
   const [scheduleSuccess, setScheduleSuccess] = useState(false);
+
+  const [zoomConfig, setZoomConfig] = useState({ meeting_id: '', passcode: '', bot_name: 'Tribuna (Bot)' });
+  const [zoomSaved, setZoomSaved] = useState(false);
+  
+  useEffect(() => {
+    const loadZoomConfig = async () => {
+      try {
+        const config = JSON.parse(await invoke('zoom_get_config') as string);
+        setZoomConfig(config);
+      } catch (e) { /* ignore */ }
+    };
+    loadZoomConfig();
+  }, []);
+
+  const handleSaveZoomConfig = async () => {
+    try {
+      await invoke('zoom_save_config', { configJson: JSON.stringify(zoomConfig) });
+      setZoomSaved(true);
+      setTimeout(() => setZoomSaved(false), 3000);
+    } catch (e: any) {
+      alert('Erro ao salvar: ' + e.message);
+    }
+  };
 
   useEffect(() => { 
     loadCurrentImage(); 
@@ -453,6 +476,134 @@ function SettingsPage({ onBack }: SettingsPageProps) {
           <strong>Como funciona:</strong> O sistema verificará automaticamente os horários configurados para o dia atual. 
           Faltando 5 minutos para o próximo horário, um cronômetro regressivo será iniciado. 
           Ao parar o cronômetro, o sistema alternará automaticamente para o JW Library.
+        </div>
+      </div>
+      
+      {/* Seção: Zoom Bot */}
+      <div style={{
+        background: '#111820', 
+        borderRadius: '14px', 
+        padding: '1.5rem', 
+        border: '1px solid rgba(255,255,255,0.04)',
+        marginTop: '1rem'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.25rem' }}>
+          <div style={{
+            width: '40px', height: '40px', borderRadius: '10px',
+            background: 'rgba(52,211,153,0.12)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center'
+          }}>
+            <Video size={20} color="#34d399" />
+          </div>
+          <div>
+            <h2 style={{ fontSize: '0.95rem', fontWeight: 700, margin: 0, color: '#e1e4e8' }}>
+              Zoom Bot
+            </h2>
+            <p style={{ fontSize: '0.78rem', color: '#8b949e', margin: '2px 0 0 0' }}>
+              Configuração do bot para monitorar mãos levantadas na reunião Zoom
+            </p>
+          </div>
+        </div>
+
+        {zoomSaved && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem',
+            padding: '0.5rem 0.75rem', borderRadius: '8px',
+            background: 'rgba(52,211,153,0.08)',
+            border: '1px solid rgba(52,211,153,0.15)',
+            fontSize: '0.78rem', color: '#34d399'
+          }}>
+            <Check size={14} />
+            Configuração salva com sucesso
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <div>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#8b949e', display: 'block', marginBottom: '0.3rem' }}>
+              ID da Reunião
+            </label>
+            <input
+              type="text"
+              value={zoomConfig.meeting_id}
+              onChange={(e) => setZoomConfig(prev => ({ ...prev, meeting_id: e.target.value }))}
+              placeholder="Ex: 86893927477"
+              style={{
+                width: '100%',
+                padding: '0.6rem 0.8rem',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                color: '#e1e4e8',
+                fontSize: '0.85rem',
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#8b949e', display: 'block', marginBottom: '0.3rem' }}>
+              Senha da Reunião
+            </label>
+            <input
+              type="password"
+              value={zoomConfig.passcode}
+              onChange={(e) => setZoomConfig(prev => ({ ...prev, passcode: e.target.value }))}
+              placeholder="Ex: 448405"
+              style={{
+                width: '100%',
+                padding: '0.6rem 0.8rem',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                color: '#e1e4e8',
+                fontSize: '0.85rem',
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#8b949e', display: 'block', marginBottom: '0.3rem' }}>
+              Nome do Bot
+            </label>
+            <input
+              type="text"
+              value={zoomConfig.bot_name}
+              onChange={(e) => setZoomConfig(prev => ({ ...prev, bot_name: e.target.value }))}
+              placeholder="Ex: Ouvinte_Silencioso"
+              style={{
+                width: '100%',
+                padding: '0.6rem 0.8rem',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                color: '#e1e4e8',
+                fontSize: '0.85rem',
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          <button
+            onClick={handleSaveZoomConfig}
+            style={{
+              padding: '0.6rem',
+              background: 'rgba(52,211,153,0.12)',
+              color: '#34d399',
+              border: '1px solid rgba(52,211,153,0.2)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '0.85rem',
+              transition: 'all 0.15s',
+              marginTop: '0.5rem',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'rgba(52,211,153,0.2)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'rgba(52,211,153,0.12)'}
+          >
+            Salvar Configuração
+          </button>
         </div>
       </div>
     </div>
