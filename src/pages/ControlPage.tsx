@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X } from 'lucide-react';
 
 function ControlPage() {
@@ -20,6 +19,7 @@ function ControlPage() {
   // ===== Sistema de notificações =====
   const [notifications, setNotifications] = useState<{ id: string; name: string; timestamp: number }[]>([]);
   const notificationIdCounter = useRef(0);
+  const notificationsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -133,7 +133,8 @@ function ControlPage() {
             
             setNotifications(prev => {
               if (prev.some(n => n.name === name)) return prev;
-              return [...prev, { id, name, timestamp }];
+              const newList = [...prev, { id, name, timestamp }];
+              return newList.slice(-10);
             });
           }
           
@@ -263,6 +264,76 @@ function ControlPage() {
   };
   
   const layout = getLayout();
+
+  // ===== CALCULAR TAMANHO DINÂMICO DAS NOTIFICAÇÕES =====
+  const getNotificationSize = () => {
+    const count = notifications.length;
+    
+    if (count === 0) return { 
+      fontSize: 1.6, 
+      padding: '1rem 1.5rem', 
+      iconSize: 48, 
+      gap: 0.75, 
+      maxWidth: 500,
+      labelSize: 0.6,
+      timeSize: 0.5
+    };
+    
+    // 🔥 A partir de 4, começa a diminuir progressivamente
+    if (count <= 3) {
+      return { 
+        fontSize: 2.0, 
+        padding: '1.2rem 1.8rem', 
+        iconSize: 56, 
+        gap: 1, 
+        maxWidth: 520,
+        labelSize: 0.7,
+        timeSize: 0.6
+      };
+    } else if (count <= 5) {
+      return { 
+        fontSize: 1.4, 
+        padding: '0.9rem 1.4rem', 
+        iconSize: 44, 
+        gap: 0.7, 
+        maxWidth: 460,
+        labelSize: 0.55,
+        timeSize: 0.45
+      };
+    } else if (count <= 7) {
+      return { 
+        fontSize: 1.0, 
+        padding: '0.7rem 1.1rem', 
+        iconSize: 36, 
+        gap: 0.5, 
+        maxWidth: 400,
+        labelSize: 0.45,
+        timeSize: 0.4
+      };
+    } else if (count <= 9) {
+      return { 
+        fontSize: 0.8, 
+        padding: '0.5rem 0.9rem', 
+        iconSize: 30, 
+        gap: 0.4, 
+        maxWidth: 350,
+        labelSize: 0.4,
+        timeSize: 0.35
+      };
+    } else {
+      return { 
+        fontSize: 0.65, 
+        padding: '0.4rem 0.7rem', 
+        iconSize: 26, 
+        gap: 0.3, 
+        maxWidth: 300,
+        labelSize: 0.35,
+        timeSize: 0.3
+      };
+    }
+  };
+
+  const size = getNotificationSize();
 
   return (
     <div style={{ 
@@ -678,45 +749,50 @@ function ControlPage() {
         )}
       </div>
 
-      {/* ===== NOTIFICAÇÕES DE MÃOS LEVANTADAS - MAIORES E FIXAS ===== */}
+      {/* ===== NOTIFICAÇÕES DE MÃOS LEVANTADAS - TAMANHO DINÂMICO ===== */}
       {notifications.length > 0 && (
-        <div style={{
-          position: 'fixed',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '1rem',
-          zIndex: 1000,
-          width: '100%',
-          maxWidth: '600px',
-          padding: '1rem',
-          pointerEvents: 'none',
-        }}>
+        <div
+          ref={notificationsRef}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center', // 🔥 Centralizado verticalmente
+            gap: `${size.gap}rem`,
+            zIndex: 1000,
+            padding: '1.5rem',
+            pointerEvents: 'none',
+          }}
+        >
           {notifications.map((notif) => (
             <div
               key={notif.id}
               style={{
                 background: 'linear-gradient(135deg, rgba(245,158,11,0.95) 0%, rgba(245,158,11,0.85) 100%)',
                 backdropFilter: 'blur(20px)',
-                borderRadius: '20px',
-                padding: '1.5rem 2rem',
+                borderRadius: '14px',
+                padding: size.padding,
                 boxShadow: '0 20px 60px rgba(245,158,11,0.4), 0 0 40px rgba(245,158,11,0.2), 0 4px 12px rgba(0,0,0,0.3)',
                 border: '2px solid rgba(255,255,255,0.2)',
                 animation: 'zoomIn 0.4s ease',
                 pointerEvents: 'auto',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '1.25rem',
+                gap: '0.6rem',
+                maxWidth: size.maxWidth,
                 width: '100%',
-                maxWidth: '500px',
+                flexShrink: 0,
+                transition: 'all 0.3s ease',
               }}
             >
               <div style={{
-                width: '64px',
-                height: '64px',
+                width: `${size.iconSize}px`,
+                height: `${size.iconSize}px`,
                 borderRadius: '50%',
                 background: 'rgba(255,255,255,0.2)',
                 display: 'flex',
@@ -725,36 +801,42 @@ function ControlPage() {
                 flexShrink: 0,
                 animation: 'pulse 2s infinite',
               }}>
-                <UserPlus size={32} color="#fff" />
+                <UserPlus size={Math.max(16, size.iconSize * 0.5)} color="#fff" />
               </div>
-              <div style={{ flex: 1, textAlign: 'center' }}>
+              
+              <div style={{ flex: 1, textAlign: 'center', minWidth: 0 }}>
                 <div style={{ 
-                  fontSize: '0.9rem', 
+                  fontSize: `${Math.max(0.3, size.labelSize)}rem`, 
                   fontWeight: 600, 
                   color: 'rgba(255,255,255,0.8)',
                   textTransform: 'uppercase',
                   letterSpacing: '1px',
                 }}>
-                  🙋 Mão levantada
+                  🙋 Levantou a mão
                 </div>
                 <div style={{ 
-                  fontSize: '2.2rem', 
+                  fontSize: `${size.fontSize}rem`, 
                   fontWeight: 800, 
                   color: '#fff',
                   textShadow: '0 2px 10px rgba(0,0,0,0.3)',
                   lineHeight: 1.2,
-                  marginTop: '0.2rem',
+                  marginTop: '0.05rem',
+                  wordBreak: 'break-word',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
                 }}>
                   {notif.name}
                 </div>
                 <div style={{ 
-                  fontSize: '0.7rem', 
+                  fontSize: `${Math.max(0.3, size.timeSize)}rem`, 
                   color: 'rgba(255,255,255,0.6)',
-                  marginTop: '0.3rem',
+                  marginTop: '0.05rem',
                 }}>
                   {new Date(notif.timestamp * 1000).toLocaleTimeString()}
                 </div>
               </div>
+              
               <button
                 onClick={() => {
                   setNotifications(prev => prev.filter(n => n.id !== notif.id));
@@ -763,8 +845,8 @@ function ControlPage() {
                   background: 'rgba(255,255,255,0.15)',
                   border: 'none',
                   borderRadius: '50%',
-                  width: '36px',
-                  height: '36px',
+                  width: `${Math.max(24, size.iconSize * 0.6)}px`,
+                  height: `${Math.max(24, size.iconSize * 0.6)}px`,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -782,10 +864,27 @@ function ControlPage() {
                   e.currentTarget.style.color = 'rgba(255,255,255,0.7)';
                 }}
               >
-                <X size={20} />
+                <X size={Math.max(12, size.iconSize * 0.35)} />
               </button>
             </div>
           ))}
+          
+          {/* 🔥 Indicador de quantidade quando há muitas notificações */}
+          {notifications.length > 5 && (
+            <div style={{
+              color: 'rgba(255,255,255,0.3)',
+              fontSize: '0.7rem',
+              textAlign: 'center',
+              padding: '0.3rem 0.8rem',
+              pointerEvents: 'none',
+              background: 'rgba(0,0,0,0.3)',
+              borderRadius: '20px',
+              backdropFilter: 'blur(10px)',
+              border: '1px solid rgba(255,255,255,0.05)',
+            }}>
+              {notifications.length} pessoas com mão levantada
+            </div>
+          )}
         </div>
       )}
 
@@ -795,7 +894,7 @@ function ControlPage() {
           position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
           background: showSentMessage === 'water' ? 'rgba(59,130,246,0.95)' : showSentMessage === 'indicator' ? 'rgba(245,158,11,0.95)' : 'rgba(239,68,68,0.95)',
           color: 'white', padding: '1.25rem 2.5rem', borderRadius: '14px',
-          fontSize: '1rem', fontWeight: 700, zIndex: 1000,
+          fontSize: '1rem', fontWeight: 700, zIndex: 1100,
           boxShadow: '0 20px 40px rgba(0,0,0,0.4)',
           display: 'flex', alignItems: 'center', gap: '0.75rem',
           animation: 'fadeInUp 0.3s ease', pointerEvents: 'none',

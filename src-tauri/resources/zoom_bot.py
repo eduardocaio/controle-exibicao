@@ -1,8 +1,16 @@
 import asyncio
 import sys
 import argparse
+import os
 from datetime import datetime
 from playwright.async_api import async_playwright
+
+# 🔥 FORÇAR SAÍDA IMEDIATA E UTF-8
+sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+
+# 🔥 REDIRECIONAR STDERR PARA STDOUT
+os.dup2(sys.stdout.fileno(), sys.stderr.fileno())
 
 async def verificar_conexao(page):
     try:

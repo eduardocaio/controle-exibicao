@@ -18,7 +18,7 @@ function SettingsPage({ onBack }: SettingsPageProps) {
   const [newTime, setNewTime] = useState({ hour: 19, minute: 30 });
   const [scheduleSuccess, setScheduleSuccess] = useState(false);
 
-  const [zoomConfig, setZoomConfig] = useState({ meeting_id: '', passcode: '', bot_name: 'Tribuna (Bot)' });
+  const [zoomConfig, setZoomConfig] = useState({ meeting_id: '', passcode: '', bot_name: 'Congregação (Bot)' });
   const [zoomSaved, setZoomSaved] = useState(false);
   
   useEffect(() => {
@@ -33,12 +33,24 @@ function SettingsPage({ onBack }: SettingsPageProps) {
 
   const handleSaveZoomConfig = async () => {
     try {
-      await invoke('zoom_save_config', { configJson: JSON.stringify(zoomConfig) });
+      // 🔥 Remover espaços do ID da reunião
+      const cleanedConfig = {
+        ...zoomConfig,
+        meeting_id: zoomConfig.meeting_id.replace(/\s/g, '')
+      };
+      setZoomConfig(cleanedConfig);
+      await invoke('zoom_save_config', { configJson: JSON.stringify(cleanedConfig) });
       setZoomSaved(true);
       setTimeout(() => setZoomSaved(false), 3000);
     } catch (e: any) {
       alert('Erro ao salvar: ' + e.message);
     }
+  };
+
+  // 🔥 Limpar espaços automaticamente enquanto digita
+  const handleMeetingIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const cleaned = e.target.value.replace(/\s/g, '');
+    setZoomConfig(prev => ({ ...prev, meeting_id: cleaned }));
   };
 
   useEffect(() => { 
@@ -526,8 +538,8 @@ function SettingsPage({ onBack }: SettingsPageProps) {
             <input
               type="text"
               value={zoomConfig.meeting_id}
-              onChange={(e) => setZoomConfig(prev => ({ ...prev, meeting_id: e.target.value }))}
-              placeholder="Ex: 86893927477"
+              onChange={handleMeetingIdChange}
+              placeholder="Digite o ID da reunião (somente números)"
               style={{
                 width: '100%',
                 padding: '0.6rem 0.8rem',
@@ -539,6 +551,9 @@ function SettingsPage({ onBack }: SettingsPageProps) {
                 outline: 'none',
               }}
             />
+            <p style={{ fontSize: '0.7rem', color: '#484f58', marginTop: '0.25rem' }}>
+              O ID da reunião fica no link da reunião Zoom (ex: zoom.us/j/123456789)
+            </p>
           </div>
 
           <div>
@@ -549,7 +564,7 @@ function SettingsPage({ onBack }: SettingsPageProps) {
               type="password"
               value={zoomConfig.passcode}
               onChange={(e) => setZoomConfig(prev => ({ ...prev, passcode: e.target.value }))}
-              placeholder="Ex: 448405"
+              placeholder="Digite a senha da reunião (se houver)"
               style={{
                 width: '100%',
                 padding: '0.6rem 0.8rem',
@@ -561,6 +576,9 @@ function SettingsPage({ onBack }: SettingsPageProps) {
                 outline: 'none',
               }}
             />
+            <p style={{ fontSize: '0.7rem', color: '#484f58', marginTop: '0.25rem' }}>
+              A senha da reunião é fornecida pelo organizador
+            </p>
           </div>
 
           <div>
@@ -571,7 +589,7 @@ function SettingsPage({ onBack }: SettingsPageProps) {
               type="text"
               value={zoomConfig.bot_name}
               onChange={(e) => setZoomConfig(prev => ({ ...prev, bot_name: e.target.value }))}
-              placeholder="Ex: Ouvinte_Silencioso"
+              placeholder="Ex: Congregação Central (Bot)"
               style={{
                 width: '100%',
                 padding: '0.6rem 0.8rem',
@@ -583,6 +601,9 @@ function SettingsPage({ onBack }: SettingsPageProps) {
                 outline: 'none',
               }}
             />
+            <p style={{ fontSize: '0.7rem', color: '#484f58', marginTop: '0.25rem' }}>
+              Substitua "Congregação" pelo nome da sua congregação
+            </p>
           </div>
 
           <button

@@ -5,7 +5,7 @@ import {
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
   FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive,
-  QrCode, Video, VideoOff, Users, UserPlus, UserMinus, RefreshCw
+  QrCode, Video, VideoOff, Users, UserPlus, RefreshCw
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';

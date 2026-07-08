@@ -1,6 +1,5 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Controle de Exibição",
+  "productName": "Controle de Exibicao",
   "version": "0.1.0",
   "identifier": "com.caio-eduardo.controle-exibicao",
   "build": {
@@ -23,10 +22,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "resources": {
       "resources/texto-do-ano.jpg": "resources/texto-do-ano.jpg",
-      "resources/zoom_bot.py": "resources/zoom_bot.py"
+      "resources/zoom_bot.exe": "resources/zoom_bot.exe"
     },
     "icon": [
       "icons/32x32.png",
