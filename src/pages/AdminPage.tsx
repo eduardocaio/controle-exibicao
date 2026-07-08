@@ -5,7 +5,7 @@ import {
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
   FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive,
-  QrCode, Video, VideoOff, Users, UserPlus, RefreshCw
+  QrCode, Video, VideoOff, Users, UserPlus
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
@@ -85,7 +85,6 @@ function AdminPage() {
         setMessageAcknowledged(true);
         setSentMessage(null);
         
-        // ✅ Capturar a resposta selecionada
         if (event.payload && event.payload.response) {
             setSelectedResponse(event.payload.response);
         }
@@ -167,7 +166,6 @@ function AdminPage() {
     try {
       const presentationId = await invoke('extract_jw_playlist', { filePath });
       await loadPresentations();
-      // Expandir a apresentação importada - CORRIGIDO: convertendo para string
       setExpandedPresentation(String(presentationId));
       alert('Arquivo JW importado com sucesso! As imagens foram extraídas na ordem da playlist.');
     } catch (e) {
@@ -238,28 +236,21 @@ function AdminPage() {
   };
 
   const handleHideImage = async () => {
-    // Primeiro define blackout para remover a imagem
     await invoke('set_blackout', { value: true });
     setActiveImageIndex(null);
     setIsBlackout(true);
     
-    // Depois verifica se o cronômetro está rodando
     try {
       const countdownState = JSON.parse(await invoke('get_countdown_state') as string);
       
       if (countdownState.running && countdownState.seconds_left > 0) {
-        // Cronômetro ativo: manter a janela display visível
-        // Não chama switch_to_jw_library
-        // Apenas garante que a janela display está visível
         await invoke('show_display_window');
         setActiveApp('sistema');
       } else {
-        // Sem cronômetro: vai para JW Library normalmente
         await invoke('switch_to_jw_library');
         setActiveApp('jw');
       }
     } catch (_) {
-      // Fallback: vai para JW Library
       await invoke('switch_to_jw_library');
       setActiveApp('jw');
     }
@@ -286,7 +277,6 @@ function AdminPage() {
   const handleSendMessage = async () => {
       if (!messageText.trim()) return;
       
-      // Filtrar opções vazias
       const options = responseOptions.filter(o => o.trim());
       
       try {
@@ -402,7 +392,6 @@ function AdminPage() {
     setZoomError(null);
     
     try {
-      // Recarregar a config antes de iniciar
       console.log('📋 Carregando configuração...');
       const config = JSON.parse(await invoke('zoom_get_config') as string);
       setZoomConfig(config);
@@ -437,18 +426,6 @@ function AdminPage() {
       setZoomError(e.message || 'Erro ao parar bot');
     }
     setZoomLoading(false);
-  };
-
-
-
-  const handleTestZoomConfig = async () => {
-    try {
-      const config = JSON.parse(await invoke('zoom_get_config') as string);
-      console.log('📋 Configuração atual:', config);
-      alert(`Configuração atual:\nID: ${config.meeting_id || 'Não configurado'}\nNome: ${config.bot_name}`);
-    } catch (e: any) {
-      alert('Erro ao ler config: ' + e.message);
-    }
   };
 
   if (showSettings) {
@@ -660,12 +637,10 @@ function AdminPage() {
                                 const newOpts = [...responseOptions];
                                 newOpts[idx] = e.target.value;
                                 
-                                // Se preencheu e é o último (até 4), adiciona mais um campo
                                 if (e.target.value.trim() && idx === newOpts.length - 1 && newOpts.length < 4) {
                                     newOpts.push('');
                                 }
                                 
-                                // Se limpou e não é o primeiro, remove campos vazios no final
                                 if (!e.target.value.trim() && idx < newOpts.length - 1) {
                                     const cleaned = newOpts.filter((o, i) => o.trim() || i === 0);
                                     setResponseOptions(cleaned.length > 0 ? cleaned : ['']);
@@ -858,7 +833,7 @@ function AdminPage() {
           </div>
         )}
 
-        {/* Painel do Zoom Bot - versão corrigida */}
+        {/* Painel do Zoom Bot - versão corrigida (sem botão de teste) */}
         <div style={{
           background: 'linear-gradient(135deg, #111820 0%, #1a1f2e 100%)',
           borderRadius: '16px',
@@ -987,25 +962,6 @@ function AdminPage() {
                   {zoomLoading ? 'Conectando...' : 'Conectar Zoom'}
                 </button>
               )}
-
-              <button
-                onClick={handleTestZoomConfig}
-                style={{
-                  padding: '0.4rem',
-                  background: 'rgba(59,130,246,0.1)',
-                  color: '#60a5fa',
-                  border: '1px solid rgba(59,130,246,0.2)',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  transition: 'all 0.15s',
-                }}
-                title="Testar configuração"
-              >
-                <RefreshCw size={14} />
-              </button>
 
               <button
                 onClick={() => setShowSettings(true)}
