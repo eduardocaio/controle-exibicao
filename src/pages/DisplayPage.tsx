@@ -168,49 +168,52 @@ function DisplayPage() {
             gap: 'clamp(1.5rem, 4vh, 3rem)'
           }}>
       
-            {/* Título */}
+            {/* 🔥 Título - MAIOR E MAIS CLARO */}
             <div style={{
-              fontSize: 'clamp(2.5rem, 2vw, 1.6rem)',
-              color: 'rgba(255,255,255,0.4)',
-              fontWeight: 500,
+              fontSize: 'clamp(3rem, 3.5vw, 4.5rem)',
+              color: 'rgba(255,255,255,0.85)',
+              fontWeight: 600,
               letterSpacing: '5px',
               textTransform: 'uppercase',
-              textAlign: 'center'
+              textAlign: 'center',
+              textShadow: '0 2px 20px rgba(0,0,0,0.3)'
             }}>
               A reunião começará em
             </div>
 
-            {/* Timer - MAIOR E MAIS GROSSO */}
+            {/* 🔥 Timer - MAIOR E MAIS GROSSO */}
             <div style={{
-              fontSize: 'clamp(8rem, 18vw, 16rem)',
-              fontWeight: 700,
+              fontSize: 'clamp(10rem, 22vw, 20rem)',
+              fontWeight: 800,
               color: '#ffffff',
               letterSpacing: '6px',
               fontVariantNumeric: 'tabular-nums',
               lineHeight: 1,
               fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-              textShadow: '0 0 80px rgba(74,144,217,0.2), 0 0 120px rgba(74,144,217,0.1)'
+              textShadow: '0 0 80px rgba(74,144,217,0.25), 0 0 120px rgba(74,144,217,0.15), 0 4px 30px rgba(0,0,0,0.3)'
             }}>
               {formatTime(countdownSeconds)}
             </div>
 
-            {/* Target time */}
+            {/* 🔥 Target time - MAIOR E MAIS CLARO */}
             {countdownTarget && (
               <div style={{
-                fontSize: 'clamp(1.5rem, 1.6vw, 1.3rem)',
-                color: 'rgba(255,255,255,0.35)',
+                fontSize: 'clamp(2rem, 2.5vw, 3.5rem)',
+                color: 'rgba(255,255,255,0.6)',
                 fontWeight: 500,
                 letterSpacing: '3px',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '0.6rem'
+                gap: '0.8rem',
+                textShadow: '0 2px 15px rgba(0,0,0,0.2)'
               }}>
                 <span style={{
-                  width: '8px', height: '8px',
+                  width: '12px', 
+                  height: '12px',
                   borderRadius: '50%',
-                  backgroundColor: 'rgba(74,144,217,0.4)',
+                  backgroundColor: 'rgba(74,144,217,0.6)',
                   display: 'inline-block',
-                  boxShadow: '0 0 8px rgba(74,144,217,0.3)'
+                  boxShadow: '0 0 20px rgba(74,144,217,0.4)'
                 }} />
                 Início às {countdownTarget}
               </div>
