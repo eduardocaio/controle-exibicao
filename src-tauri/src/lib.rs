@@ -2555,19 +2555,38 @@ async fn zoom_stop_bot(
     zoom_bot: tauri::State<'_, Arc<ZoomBotProcess>>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    println!("🔴 Parando Zoom Bot...");
+    
+    // 1. Sinalizar para parar
     zoom_bot.should_stop.store(true, Ordering::SeqCst);
     
-    let mut process = zoom_bot.process.lock().await;
-    if let Some(mut child) = process.take() {  
-        let _ = child.kill().await;
-        let _ = timeout(Duration::from_secs(3), child.wait()).await;
+    // 2. Tentar matar o processo principal (se tiver)
+    {
+        let mut process = zoom_bot.process.lock().await;
+        if let Some(mut child) = process.take() {
+            let _ = child.kill().await;
+            let _ = timeout(Duration::from_secs(3), child.wait()).await;
+        }
     }
     
+    // 3. 🔥 FORÇAR FECHAMENTO DO zoom_bot.exe PELO NOME
+    println!("🔴 Forçando fechamento do zoom_bot.exe...");
+    
+    // Usando taskkill para matar o processo pelo nome exato
+    let _ = std::process::Command::new("taskkill")
+        .args(&["/F", "/IM", "zoom_bot.exe"])
+        .spawn();
+    
+    // Também tenta matar pelo PID se tiver (opcional, mas vamos manter só o nome)
+    // O taskkill /F /IM já é suficiente
+    
+    // 4. Limpar estado
     zoom_bot.connected.store(false, Ordering::SeqCst);
     *zoom_bot.raised_hands.lock().await = Vec::new();
     *zoom_bot.error.lock().await = None;
     
     let _ = app_handle.emit("zoom-disconnected", "Bot parado manualmente");
+    println!("✅ Zoom Bot parado com sucesso!");
     Ok(())
 }
 

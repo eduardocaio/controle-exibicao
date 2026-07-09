@@ -83,6 +83,50 @@ async def abrir_painel_participantes(page):
         print(f"[Bot] Erro ao abrir painel: {e}")
         return False
 
+async def mutar_audio_e_video(page):
+    """Muta o microfone e desliga a câmera antes de entrar na reunião"""
+    try:
+        # 🔥 Desligar a câmera
+        print("[Bot] Desligando câmera...")
+        try:
+            # Usando o seletor fornecido
+            video_btn = page.locator("#preview-video-control-button")
+            if await video_btn.is_visible(timeout=2000):
+                await video_btn.click()
+                print("[Bot] ✅ Câmera desligada!")
+            else:
+                # Tentar por atributo aria-label
+                video_btn = page.locator('button[aria-label*="camera" i], button[aria-label*="câmera" i], button[aria-label*="video" i]').first
+                if await video_btn.is_visible(timeout=2000):
+                    await video_btn.click()
+                    print("[Bot] ✅ Câmera desligada!")
+                else:
+                    print("[Bot] ⚠️ Botão da câmera não encontrado")
+        except Exception as e:
+            print(f"[Bot] ⚠️ Erro ao desligar câmera: {e}")
+        
+        # 🔥 Mutar o microfone
+        print("[Bot] Mutando microfone...")
+        try:
+            # Usando o seletor fornecido
+            audio_btn = page.locator("#preview-audio-control-button")
+            if await audio_btn.is_visible(timeout=2000):
+                await audio_btn.click()
+                print("[Bot] ✅ Microfone mutado!")
+            else:
+                # Tentar por atributo aria-label
+                audio_btn = page.locator('button[aria-label*="microfone" i], button[aria-label*="mute" i], button[aria-label*="audio" i]').first
+                if await audio_btn.is_visible(timeout=2000):
+                    await audio_btn.click()
+                    print("[Bot] ✅ Microfone mutado!")
+                else:
+                    print("[Bot] ⚠️ Botão do microfone não encontrado")
+        except Exception as e:
+            print(f"[Bot] ⚠️ Erro ao mutar microfone: {e}")
+            
+    except Exception as e:
+        print(f"[Bot] ⚠️ Erro ao mutar áudio/vídeo: {e}")
+
 async def fazer_login(page, meeting_id, passcode, nome):
     try:
         url_web_client = f"https://zoom.us/wc/join/{meeting_id}"
@@ -180,6 +224,9 @@ async def fazer_login(page, meeting_id, passcode, nome):
         """)
         
         await asyncio.sleep(0.5)
+        
+        # 🔥 MUTAR ÁUDIO E VÍDEO ANTES DE CLICAR NO JOIN
+        await mutar_audio_e_video(page)
         
         # Clicar Join
         print("[Bot] Procurando botao 'Join'...")

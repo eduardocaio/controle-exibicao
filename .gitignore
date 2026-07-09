@@ -23,3 +23,4 @@ dist-ssr
 *.sln
 *.sw?
 src-tauri/resources/zoom_bot.exe
+src-tauri/resources/zoom_bot_backup.exe
