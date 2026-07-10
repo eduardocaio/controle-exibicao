@@ -15,6 +15,16 @@ function DisplayPage() {
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const [countdownTarget, setCountdownTarget] = useState('');
 
+  // Função para lidar com o fim do vídeo
+  const handleVideoEnded = async () => {
+    console.log('🎬 Vídeo terminou, notificando backend');
+    try {
+      await invoke('video_finished');
+    } catch (error) {
+      console.error('Erro ao notificar fim do vídeo:', error);
+    }
+  };
+
   useEffect(() => {
     const unlisten = listen('texto-do-ano-atualizado', () => setRefreshKey(prev => prev + 1));
     return () => { unlisten.then(fn => fn()); };
@@ -49,6 +59,38 @@ function DisplayPage() {
       unlisten.then(fn => fn());
     };
   }, []);
+
+  // Timeout de segurança para forçar fim do vídeo se o evento onEnded falhar
+  useEffect(() => {
+    if (mediaType === 'video' && videoRef.current && videoSrc) {
+      // Tentar obter a duração do vídeo
+      const video = videoRef.current;
+      
+      const onLoadedMetadata = () => {
+        const duration = video.duration;
+        if (duration > 0) {
+          // Adiciona 1 segundo de margem
+          const timeoutMs = (duration + 1) * 1000;
+          console.log(`⏰ Configurando timeout de segurança: ${timeoutMs}ms`);
+          
+          const timer = setTimeout(() => {
+            if (videoRef.current && !videoRef.current.ended && !videoRef.current.paused) {
+              console.log('⏰ Timeout: forçando fim do vídeo');
+              handleVideoEnded();
+            }
+          }, timeoutMs);
+          
+          return () => clearTimeout(timer);
+        }
+      };
+      
+      video.addEventListener('loadedmetadata', onLoadedMetadata);
+      
+      return () => {
+        video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      };
+    }
+  }, [videoSrc, mediaType]);
 
   useEffect(() => {
     (async () => { 
@@ -177,8 +219,9 @@ function DisplayPage() {
             ref={videoRef}
             src={videoSrc}
             autoPlay
-            loop
             playsInline
+            loop={false}  // 🔥 GARANTIR QUE NÃO REPETE
+            onEnded={handleVideoEnded}  // 🔥 DETECTAR FIM DO VÍDEO
             style={{ 
               width: '100%', 
               height: '100%', 

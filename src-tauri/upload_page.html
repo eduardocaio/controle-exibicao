@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Enviar Imagens</title>
+    <title>Enviar Mídia</title>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         body{font-family:-apple-system,sans-serif;background:#0b0e11;color:#e1e4e8;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
@@ -18,10 +18,15 @@
         .btn:hover:not(:disabled){background:#5a6fd6}
         .preview{display:flex;flex-direction:column;gap:.5rem;margin:1rem 0}
         .preview-item{display:flex;align-items:center;gap:.75rem;background:rgba(255,255,255,.03);border-radius:10px;padding:.5rem;border:1px solid rgba(255,255,255,.05)}
-        .preview-item img{width:60px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0}
+        .preview-item .thumb{width:60px;height:60px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:#0a0a1a;overflow:hidden;font-size:1.5rem}
+        .preview-item .thumb img{width:100%;height:100%;object-fit:cover}
         .preview-item .info{flex:1;text-align:left;min-width:0}
         .preview-item .name{font-size:.8rem;color:#e1e4e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .preview-item .size{font-size:.7rem;color:#6b7280}
+        .preview-item .type-badge{font-size:.6rem;padding:.1rem .4rem;border-radius:4px;display:inline-block;margin-top:2px}
+        .type-badge.image{background:rgba(52,211,153,.15);color:#34d399}
+        .type-badge.video{background:rgba(102,126,234,.15);color:#667eea}
+        .type-badge.playlist{background:rgba(245,158,11,.15);color:#fbbf24}
         .preview-item .actions{display:flex;gap:.25rem;flex-shrink:0}
         .preview-item .actions button{width:32px;height:32px;border-radius:6px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;transition:all .15s;background:rgba(255,255,255,.04);color:#8b949e}
         .preview-item .actions button:hover{background:rgba(255,255,255,.1);color:#e1e4e8}
@@ -33,21 +38,23 @@
         .icon{font-size:2.5rem;margin-bottom:.5rem}
         .clear-btn{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.2)}
         .clear-btn:hover:not(:disabled){background:rgba(239,68,68,.2)}
+        .upload-info{font-size:.7rem;color:#6b7280;margin-top:.5rem}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Enviar Imagens</h1>
-        <p>Selecione, ordene e envie as imagens</p>
+        <h1>📤 Enviar Mídia</h1>
+        <p>Imagens, vídeos ou playlist JW</p>
         <div class="upload-area" id="drop-area" onclick="document.getElementById('file-input').click()">
             <div class="icon">📁</div>
             <div>Toque para selecionar</div>
-            <div style="font-size:.75rem;color:#6b7280;margin-top:.5rem">ou arraste as imagens aqui</div>
+            <div style="font-size:.75rem;color:#6b7280;margin-top:.5rem">ou arraste aqui</div>
+            <div class="upload-info">Suporta: JPG, PNG, GIF, WebP, MP4, WEBM, MOV, AVI, MKV e arquivos .jwlplaylist</div>
         </div>
-        <input type="file" id="file-input" accept="image/*" multiple>
+        <input type="file" id="file-input" accept="image/*,video/*,.jwlplaylist,.zip" multiple>
         <div id="count" class="count" style="display:none"></div>
         <div id="preview" class="preview"></div>
-        <button id="send-btn" class="btn" disabled onclick="sendImages()">📤 Enviar</button>
+        <button id="send-btn" class="btn" disabled onclick="sendFiles()">📤 Enviar</button>
         <button id="clear-btn" class="btn clear-btn" style="display:none;margin-top:.5rem" onclick="clearAll()">🗑️ Limpar tudo</button>
         <div id="status"></div>
     </div>
@@ -62,120 +69,230 @@
         const st=document.getElementById('status');
         const da=document.getElementById('drop-area');
         
-        fi.addEventListener('change',e=>handleFiles(e.target.files));
-        da.addEventListener('dragover',e=>{e.preventDefault();da.classList.add('dragover')});
-        da.addEventListener('dragleave',()=>da.classList.remove('dragover'));
-        da.addEventListener('drop',e=>{e.preventDefault();da.classList.remove('dragover');handleFiles(e.dataTransfer.files)});
+        const isImage = (name) => /\.(jpg|jpeg|png|webp|gif|bmp|tif|tiff|svg)$/i.test(name);
+        const isVideo = (name) => /\.(mp4|webm|mov|avi|mkv|m4v|ogv|wmv|flv|3gp)$/i.test(name);
+        const isPlaylist = (name) => /\.(jwlplaylist|zip)$/i.test(name);
         
-        function handleFiles(fl){
-            const newFiles=Array.from(fl).filter(f=>f.type.startsWith('image/'));
-            files=[...files,...newFiles];
+        const getFileType = (name) => {
+            if (isPlaylist(name)) return 'playlist';
+            if (isVideo(name)) return 'video';
+            if (isImage(name)) return 'image';
+            return 'unknown';
+        };
+        
+        const getFileIcon = (type) => {
+            if (type === 'playlist') return '📋';
+            if (type === 'video') return '🎬';
+            return '🖼️';
+        };
+        
+        const getTypeBadge = (type) => {
+            const labels = { image: 'Imagem', video: 'Vídeo', playlist: 'Playlist JW' };
+            return `<span class="type-badge ${type}">${labels[type] || 'Arquivo'}</span>`;
+        };
+        
+        const createThumbnail = (file) => {
+            return new Promise((resolve) => {
+                const type = getFileType(file.name);
+                
+                if (type === 'video') {
+                    // Para vídeos, tenta gerar thumbnail
+                    const video = document.createElement('video');
+                    video.preload = 'metadata';
+                    video.muted = true;
+                    video.onloadedmetadata = () => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 120;
+                        canvas.height = 90;
+                        video.currentTime = Math.min(1, video.duration / 2);
+                        video.onseeked = () => {
+                            canvas.getContext('2d').drawImage(video, 0, 0, 120, 90);
+                            resolve(canvas.toDataURL());
+                        };
+                        setTimeout(() => {
+                            // Fallback se seeked não disparar
+                            canvas.getContext('2d').drawImage(video, 0, 0, 120, 90);
+                            resolve(canvas.toDataURL());
+                        }, 2000);
+                    };
+                    video.onerror = () => {
+                        // Fallback: ícone de vídeo
+                        resolve(null);
+                    };
+                    video.src = URL.createObjectURL(file);
+                    video.load();
+                } else if (type === 'image') {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(file);
+                } else {
+                    resolve(null);
+                }
+            });
+        };
+        
+        fi.addEventListener('change', async (e) => {
+            await handleFiles(e.target.files);
+        });
+        
+        da.addEventListener('dragover', (e) => { e.preventDefault(); da.classList.add('dragover'); });
+        da.addEventListener('dragleave', () => da.classList.remove('dragover'));
+        da.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            da.classList.remove('dragover');
+            await handleFiles(e.dataTransfer.files);
+        });
+        
+        async function handleFiles(fl) {
+            const newFiles = Array.from(fl);
+            
+            // Verificar se há arquivos de playlist
+            const playlists = newFiles.filter(f => isPlaylist(f.name));
+            
+            // Adicionar todos os arquivos
+            for (const file of newFiles) {
+                const type = getFileType(file.name);
+                if (type !== 'unknown') {
+                    const thumb = await createThumbnail(file);
+                    files.push({ file, type, thumb });
+                }
+            }
+            
             renderPreview();
         }
         
-        function renderPreview(){
-            ct.style.display=files.length?'inline-block':'none';
-            ct.textContent=files.length+(files.length===1?' imagem':' imagens');
-            sb.disabled=!files.length;
-            cb.style.display=files.length?'block':'none';
+        function renderPreview() {
+            const total = files.length;
+            const playlistCount = files.filter(f => f.type === 'playlist').length;
+            const videoCount = files.filter(f => f.type === 'video').length;
+            const imageCount = files.filter(f => f.type === 'image').length;
             
-            pr.innerHTML='';
-            files.forEach((f,i)=>{
-                const div=document.createElement('div');
-                div.className='preview-item';
+            ct.style.display = total ? 'inline-block' : 'none';
+            ct.textContent = `${total} arquivo${total !== 1 ? 's' : ''}`;
+            if (total > 0) {
+                ct.textContent += ` (${imageCount} img, ${videoCount} vid, ${playlistCount} playlist)`;
+            }
+            
+            sb.disabled = !total;
+            cb.style.display = total ? 'block' : 'none';
+            
+            pr.innerHTML = '';
+            files.forEach((f, i) => {
+                const div = document.createElement('div');
+                div.className = 'preview-item';
                 
-                const img=document.createElement('img');
-                const reader=new FileReader();
-                reader.onload=e=>img.src=e.target.result;
-                reader.readAsDataURL(f);
+                const thumbDiv = document.createElement('div');
+                thumbDiv.className = 'thumb';
+                if (f.thumb) {
+                    const img = document.createElement('img');
+                    img.src = f.thumb;
+                    thumbDiv.appendChild(img);
+                } else {
+                    thumbDiv.textContent = getFileIcon(f.type);
+                    thumbDiv.style.fontSize = '1.8rem';
+                }
                 
-                const info=document.createElement('div');
-                info.className='info';
-                info.innerHTML=`
-                    <div class="name">${i+1}. ${f.name}</div>
-                    <div class="size">${formatSize(f.size)}</div>
+                const info = document.createElement('div');
+                info.className = 'info';
+                info.innerHTML = `
+                    <div class="name">${i+1}. ${f.file.name}</div>
+                    <div class="size">${formatSize(f.file.size)}</div>
+                    ${getTypeBadge(f.type)}
                 `;
                 
-                const actions=document.createElement('div');
-                actions.className='actions';
+                const actions = document.createElement('div');
+                actions.className = 'actions';
                 
-                const upBtn=document.createElement('button');
-                upBtn.className='up-btn';
-                upBtn.innerHTML='⬆️';
-                upBtn.title='Mover para cima';
-                upBtn.onclick=e=>{e.stopPropagation();moveItem(i,-1)};
+                const upBtn = document.createElement('button');
+                upBtn.className = 'up-btn';
+                upBtn.innerHTML = '⬆️';
+                upBtn.title = 'Mover para cima';
+                upBtn.onclick = (e) => { e.stopPropagation(); moveItem(i, -1); };
                 
-                const downBtn=document.createElement('button');
-                downBtn.className='down-btn';
-                downBtn.innerHTML='⬇️';
-                downBtn.title='Mover para baixo';
-                downBtn.onclick=e=>{e.stopPropagation();moveItem(i,1)};
+                const downBtn = document.createElement('button');
+                downBtn.className = 'down-btn';
+                downBtn.innerHTML = '⬇️';
+                downBtn.title = 'Mover para baixo';
+                downBtn.onclick = (e) => { e.stopPropagation(); moveItem(i, 1); };
                 
-                const delBtn=document.createElement('button');
-                delBtn.className='delete-btn';
-                delBtn.innerHTML='✕';
-                delBtn.title='Remover';
-                delBtn.onclick=e=>{e.stopPropagation();removeItem(i)};
+                const delBtn = document.createElement('button');
+                delBtn.className = 'delete-btn';
+                delBtn.innerHTML = '✕';
+                delBtn.title = 'Remover';
+                delBtn.onclick = (e) => { e.stopPropagation(); removeItem(i); };
                 
                 actions.appendChild(upBtn);
                 actions.appendChild(downBtn);
                 actions.appendChild(delBtn);
                 
-                div.appendChild(img);
+                div.appendChild(thumbDiv);
                 div.appendChild(info);
                 div.appendChild(actions);
                 pr.appendChild(div);
             });
         }
         
-        function moveItem(index,direction){
-            const newIndex=index+direction;
-            if(newIndex<0||newIndex>=files.length)return;
-            [files[index],files[newIndex]]=[files[newIndex],files[index]];
+        function moveItem(index, direction) {
+            const newIndex = index + direction;
+            if (newIndex < 0 || newIndex >= files.length) return;
+            [files[index], files[newIndex]] = [files[newIndex], files[index]];
             renderPreview();
         }
         
-        function removeItem(index){
-            files.splice(index,1);
+        function removeItem(index) {
+            files.splice(index, 1);
             renderPreview();
         }
         
-        function clearAll(){
-            if(confirm('Remover todas as imagens?')){
-                files=[];
+        function clearAll() {
+            if (confirm('Remover todos os arquivos?')) {
+                files = [];
                 renderPreview();
-                fi.value='';
+                fi.value = '';
             }
         }
         
-        function formatSize(bytes){
-            if(bytes<1024)return bytes+' B';
-            if(bytes<1048576)return (bytes/1024).toFixed(1)+' KB';
-            return (bytes/1048576).toFixed(1)+' MB';
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
         }
         
-        async function sendImages(){
-            if(!files.length)return;
-            sb.disabled=true;
-            sb.textContent='Enviando...';
-            const fd=new FormData();
-            files.forEach(f=>fd.append('images',f));
-            try{
-                const r=await fetch('/api/upload/'+TOKEN,{method:'POST',body:fd});
-                const j=await r.json();
-                if(j.success){
-                    st.innerHTML='<div class="success">✅ Enviado com sucesso!</div>';
-                    files=[];
+        async function sendFiles() {
+            if (!files.length) return;
+            sb.disabled = true;
+            sb.textContent = 'Enviando...';
+            const fd = new FormData();
+            
+            // 🔥 ORDENAR: Playlists primeiro, depois vídeos, depois imagens
+            const sorted = [...files];
+            sorted.sort((a, b) => {
+                const order = { playlist: 0, video: 1, image: 2 };
+                return (order[a.type] || 3) - (order[b.type] || 3);
+            });
+            
+            // Adicionar todos os arquivos ao FormData
+            sorted.forEach(f => {
+                fd.append('files', f.file);
+            });
+            
+            try {
+                const r = await fetch('/api/upload/' + TOKEN, { method: 'POST', body: fd });
+                const j = await r.json();
+                if (j.success) {
+                    st.innerHTML = '<div class="success">✅ Enviado com sucesso! Ordem: Playlists → Vídeos → Imagens</div>';
+                    files = [];
                     renderPreview();
-                    fi.value='';
-                }else{
-                    st.innerHTML='<div class="error">❌ Erro: '+(j.error||'desconhecido')+'</div>';
+                    fi.value = '';
+                } else {
+                    st.innerHTML = '<div class="error">❌ Erro: ' + (j.error || 'desconhecido') + '</div>';
                 }
-            }catch(e){
-                st.innerHTML='<div class="error">❌ Erro de conexão</div>';
+            } catch (e) {
+                st.innerHTML = '<div class="error">❌ Erro de conexão</div>';
             }
-            sb.disabled=false;
-            sb.textContent='📤 Enviar';
+            sb.disabled = false;
+            sb.textContent = '📤 Enviar';
         }
     </script>
 </body>

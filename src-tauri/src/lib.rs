@@ -834,23 +834,10 @@ async fn extract_jw_playlist(
     state: tauri::State<'_, SharedState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let file_path_buf = PathBuf::from(&file_path);
     
-    let zip_data = fs::read(&file_path).map_err(|e| format!("Erro ao ler arquivo: {}", e))?;
-    
-    let temp_dir = extract_zip_to_temp(&zip_data, &app_handle)?;
-    
-    let db_path = find_user_db(&temp_dir);
-    
-    let images_dir = app_dir.join("images");
-    let thumbs_dir = app_dir.join("thumbnails");
-    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
-    
-    let min_side = 300u32;
-    let min_pixels = 120000u64;
-    
-    let mut app_state = state.write().await;
+    // Extrair os slides
+    let slides = extract_jw_playlist_internal(&file_path_buf, &app_handle).await?;
     
     let presentation_name = PathBuf::from(&file_path)
         .file_stem()
@@ -860,137 +847,14 @@ async fn extract_jw_playlist(
     
     let presentation_id = uuid::Uuid::new_v4().to_string();
     
-    let mut new_slides = Vec::new();
-    
-    if let Some(db_path) = db_path {
-        if let Ok(items) = extract_media_from_db(&db_path) {
-            let mut grouped: HashMap<i64, Vec<&PlaylistItem>> = HashMap::new();
-            
-            for item in &items {
-                let file_path_normalized = item.file_path.replace('\\', "/").trim_start_matches('/').to_string();
-                let thumb_normalized = item.thumbnail_file_path.replace('\\', "/").trim_start_matches('/').to_string();
-                
-                if !thumb_normalized.is_empty() && file_path_normalized == thumb_normalized {
-                    continue;
-                }
-                
-                if is_thumbnail_name(&item.file_path) || is_thumbnail_name(&item.original_filename) {
-                    continue;
-                }
-                
-                if let Some(src_path) = find_file_in_dir(&temp_dir, &item.file_path) {
-                    let ext = src_path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("jpg");
-                    
-                    if !is_media_ext(ext) {
-                        continue;
-                    }
-                    
-                    if is_image_ext(ext) && is_thumbnail_by_resolution(&src_path, min_side, min_pixels) {
-                        continue;
-                    }
-                    
-                    grouped.entry(item.playlist_item_id)
-                        .or_insert_with(Vec::new)
-                        .push(item);
-                }
-            }
-            
-            let mut ordered_ids: Vec<i64> = grouped.keys().cloned().collect();
-            ordered_ids.sort();
-            
-            for id in ordered_ids {
-                if let Some(items) = grouped.get(&id) {
-                    if let Some(item) = items.first() {
-                        if let Some(src_path) = find_file_in_dir(&temp_dir, &item.file_path) {
-                            let ext = src_path.extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("jpg");
-                            
-                            let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-                            let dest_path = images_dir.join(&new_filename);
-                            let thumb_path = thumbs_dir.join(&new_filename);
-                            
-                            if let Ok(img) = image::open(&src_path) {
-                                let (width, height) = img.dimensions();
-                                let optimized = if width > 1920 || height > 1080 {
-                                    let aspect = width as f32 / height as f32;
-                                    let new_h = 1080u32;
-                                    let new_w = (new_h as f32 * aspect) as u32;
-                                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
-                                } else {
-                                    img
-                                };
-                                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
-                                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
-                                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
-                            } else {
-                                fs::copy(&src_path, &dest_path).ok();
-                                fs::copy(&src_path, &thumb_path).ok();
-                            }
-                            
-                            new_slides.push(Slide {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                filename: new_filename,
-                                order: new_slides.len(),
-                                is_video: false,
-                                duration: None,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        let mut all_media = Vec::new();
-        copy_media_fallback(&temp_dir, &mut all_media);
-        
-        for src_path in &all_media {
-            let ext = src_path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("jpg");
-            
-            let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-            let dest_path = images_dir.join(&new_filename);
-            let thumb_path = thumbs_dir.join(&new_filename);
-            
-            if let Ok(img) = image::open(src_path) {
-                let (width, height) = img.dimensions();
-                let optimized = if width > 1920 || height > 1080 {
-                    let aspect = width as f32 / height as f32;
-                    let new_h = 1080u32;
-                    let new_w = (new_h as f32 * aspect) as u32;
-                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
-                } else {
-                    img
-                };
-                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
-                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
-                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
-            } else {
-                fs::copy(src_path, &dest_path).ok();
-                fs::copy(src_path, &thumb_path).ok();
-            }
-            
-            new_slides.push(Slide {
-                id: uuid::Uuid::new_v4().to_string(),
-                filename: new_filename,
-                order: new_slides.len(),
-                is_video: false,
-                duration: None,
-            });
-        }
-    }
-    
+    // Salvar no estado
+    let mut app_state = state.write().await;
     app_state.presentations.push(Presentation {
         id: presentation_id.clone(),
         name: presentation_name,
-        slides: new_slides,
+        slides,
         active: false,
     });
-    
-    let _ = fs::remove_dir_all(&temp_dir);
     
     save_state_to_disk(&app_state, &app_handle);
     
@@ -1793,6 +1657,9 @@ async fn handle_ws_connection(
                                         clients.broadcast(response);
                                     }
                                 },
+                                "video_finished" => {
+                                    println!("🎬 Video finished command received from client");
+                                }
                                 "refresh" => {},
                                 _ => {}
                             }
@@ -2302,7 +2169,7 @@ fn start_upload_server(
 
         let upload_api = warp::path!("api" / "upload" / String)
             .and(warp::post())
-            .and(warp::multipart::form().max_length(100 * 1024 * 1024))
+            .and(warp::multipart::form().max_length(500 * 1024 * 1024)) // 🔥 500MB para vídeos
             .and(state)
             .and_then(move |token: String, mut form: warp::multipart::FormData, (state, handle, sessions, clients): (SharedState, tauri::AppHandle, Arc<UploadSessions>, Arc<WsClients>)| async move {
                 let session_name = {
@@ -2317,17 +2184,24 @@ fn start_upload_server(
                 let app_dir = get_data_dir(&handle);
                 let images_dir = app_dir.join("images");
                 let thumbs_dir = app_dir.join("thumbnails");
+                let videos_dir = app_dir.join("videos");
+                let temp_dir = app_dir.join("upload_temp");
                 fs::create_dir_all(&images_dir).ok();
                 fs::create_dir_all(&thumbs_dir).ok();
+                fs::create_dir_all(&videos_dir).ok();
+                fs::create_dir_all(&temp_dir).ok();
 
-                let mut new_slides = Vec::new();
+                let mut new_slides: Vec<Slide> = Vec::new();
+                let mut playlist_slides = Vec::new(); // Slides da JWLplaylist
+                let mut media_slides = Vec::new(); // Slides de imagens/vídeos
 
+                // 🔥 PRIMEIRO: Processar todos os arquivos
                 while let Some(Ok(part)) = form.next().await {
-                    let filename = part.filename().unwrap_or("imagem.jpg").to_string();
+                    let filename = part.filename().unwrap_or("arquivo").to_string();
                     let ext = PathBuf::from(&filename)
                         .extension()
                         .and_then(|e| e.to_str())
-                        .unwrap_or("jpg")
+                        .unwrap_or("")
                         .to_lowercase();
                     
                     let mut data = Vec::new();
@@ -2342,20 +2216,339 @@ fn start_upload_server(
                         }
                     }
                     
-                    if !data.is_empty() {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    
+                    // 🔥 VERIFICAR SE É PLAYLIST JW
+                    let is_jw_playlist = filename.ends_with(".jwlplaylist") || filename.ends_with(".zip");
+                    
+                    if is_jw_playlist {
+                        // 🔥 PROCESSAR PLAYLIST JW
+                        let temp_file = temp_dir.join(&filename);
+                        if let Ok(_) = fs::write(&temp_file, &data) {
+                            // Extrair a playlist
+                            match extract_jw_playlist_from_data(&temp_file, &handle).await {
+                                Ok(slides) => {
+                                    playlist_slides.extend(slides);
+                                }
+                                Err(e) => {
+                                    eprintln!("❌ Erro ao extrair playlist: {}", e);
+                                }
+                            }
+                            let _ = fs::remove_file(&temp_file);
+                        }
+                    } else {
+                        // 🔥 PROCESSAR MÍDIA NORMAL
+                        let is_video = is_video_ext(&ext);
+                        let is_image = is_image_ext(&ext);
+                        
+                        if !is_video && !is_image {
+                            continue;
+                        }
+                        
                         let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-                        let dest = images_dir.join(&new_filename);
-                        let thumb = thumbs_dir.join(&new_filename);
+                        
+                        if is_video {
+                            let dest_path = videos_dir.join(&new_filename);
+                            let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
+                            
+                            if let Ok(_) = fs::write(&dest_path, &data) {
+                                // Gerar thumbnail
+                                let video_duration = get_video_duration(&dest_path);
+                                let seek_time = if let Some(dur) = video_duration {
+                                    let mid = dur / 2.0;
+                                    format!("{:.2}", mid)
+                                } else {
+                                    "00:00:10.000".to_string()
+                                };
+                                
+                                let status = std::process::Command::new("ffmpeg")
+                                    .args(&[
+                                        "-i", dest_path.to_str().unwrap_or(""),
+                                        "-ss", &seek_time,
+                                        "-vframes", "1",
+                                        "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+                                        "-update", "1",
+                                        thumb_path.to_str().unwrap_or(""),
+                                        "-y"
+                                    ])
+                                    .status();
+                                
+                                if status.is_err() || !thumb_path.exists() {
+                                    create_placeholder_thumbnail(&thumb_path);
+                                }
+                                
+                                media_slides.push(Slide {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    filename: new_filename,
+                                    order: 0,
+                                    is_video: true,
+                                    duration: video_duration,
+                                });
+                            }
+                        } else if is_image {
+                            let dest_path = images_dir.join(&new_filename);
+                            let thumb_path = thumbs_dir.join(&new_filename);
+                            
+                            if let Ok(img) = image::load_from_memory(&data) {
+                                let (width, height) = img.dimensions();
+                                let optimized = if width > 1920 || height > 1080 {
+                                    let aspect = width as f32 / height as f32;
+                                    let new_h = 1080u32;
+                                    let new_w = (new_h as f32 * aspect) as u32;
+                                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                                } else {
+                                    img
+                                };
+                                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
+                                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+                                
+                                media_slides.push(Slide {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    filename: new_filename,
+                                    order: 0,
+                                    is_video: false,
+                                    duration: None,
+                                });
+                            } else {
+                                let _ = fs::write(&dest_path, &data);
+                                let _ = fs::write(&thumb_path, &data);
+                                media_slides.push(Slide {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    filename: new_filename,
+                                    order: 0,
+                                    is_video: false,
+                                    duration: None,
+                                });
+                            }
+                        }
+                    }
+                }
 
-                        if fs::write(&dest, &data).is_ok() {
-                            if let Ok(img) = image::open(&dest) {
-                                let (w, h) = img.dimensions();
-                                let opt = if w > 1920 || h > 1080 {
-                                    let new_w = (1080.0 * w as f32 / h as f32) as u32;
-                                    img.resize_exact(new_w, 1080, image::imageops::FilterType::Lanczos3)
-                                } else { img };
-                                let _ = opt.resize_exact(400, 300, image::imageops::FilterType::Lanczos3).save_with_format(&thumb, image::ImageFormat::Jpeg);
-                                let _ = opt.save_with_format(&dest, image::ImageFormat::Jpeg);
+                // 🔥 COMBINAR: Playlist primeiro, depois mídia
+                let mut all_slides = Vec::new();
+                all_slides.extend(playlist_slides);
+                all_slides.extend(media_slides);
+                
+                // Reordenar
+                for (i, slide) in all_slides.iter_mut().enumerate() {
+                    slide.order = i;
+                }
+
+                if !all_slides.is_empty() {
+                    let mut app_state = state.write().await;
+                    let pres_id = uuid::Uuid::new_v4().to_string();
+                    app_state.presentations.push(Presentation {
+                        id: pres_id.clone(),
+                        name: session_name.unwrap(),
+                        slides: all_slides,
+                        active: false,
+                    });
+                    save_state_to_disk(&app_state, &handle);
+                    sessions.sessions.lock().unwrap().remove(&token);
+                    
+                    handle.emit("tablet-upload-complete", &pres_id).ok();
+                }
+
+                // Limpar temp
+                let _ = fs::remove_dir_all(&temp_dir);
+
+                Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"success": true})))
+            });
+
+        let routes = upload_page.or(upload_api);
+        println!("📱 Servidor de Upload: http://0.0.0.0:20779");
+        warp::serve(routes).run(([0, 0, 0, 0], 20779)).await;
+    });
+}
+
+async fn extract_jw_playlist_from_data(file_path: &PathBuf, app_handle: &tauri::AppHandle) -> Result<Vec<Slide>, String> {
+    // Usa a função existente extract_jw_playlist, mas com um caminho temporário
+    // Esta função deve retornar os slides extraídos sem salvar no estado global
+    
+    let app_dir = get_data_dir(app_handle);
+    let temp_dir = app_dir.join("jw_temp").join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    
+    // Copiar o arquivo para o temp
+    let dest_file = temp_dir.join(file_path.file_name().unwrap_or_default());
+    fs::copy(file_path, &dest_file).map_err(|e| e.to_string())?;
+    
+    // Usar a lógica de extração existente, mas retornar slides
+    let result = extract_jw_playlist_internal(&dest_file, app_handle).await;
+    
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
+}
+
+async fn extract_jw_playlist_internal(file_path: &PathBuf, app_handle: &tauri::AppHandle) -> Result<Vec<Slide>, String> {
+    let app_dir = get_data_dir(app_handle);
+    
+    // Ler o arquivo ZIP
+    let zip_data = fs::read(file_path).map_err(|e| format!("Erro ao ler arquivo: {}", e))?;
+    
+    // Extrair para diretório temporário
+    let temp_dir = extract_zip_to_temp(&zip_data, app_handle)?;
+    
+    let db_path = find_user_db(&temp_dir);
+    
+    let images_dir = app_dir.join("images");
+    let thumbs_dir = app_dir.join("thumbnails");
+    let videos_dir = app_dir.join("videos");
+    fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
+    
+    let min_side = 300u32;
+    let min_pixels = 120000u64;
+    
+    let mut new_slides: Vec<Slide> = Vec::new();
+    
+    if let Some(db_path) = db_path {
+        if let Ok(items) = extract_media_from_db(&db_path) {
+            // Agrupar por playlist_item_id
+            let mut grouped: HashMap<i64, (String, Vec<PathBuf>, Vec<PathBuf>)> = HashMap::new();
+            
+            for item in &items {
+                let file_path_normalized = item.file_path.replace('\\', "/").trim_start_matches('/').to_string();
+                let thumb_normalized = item.thumbnail_file_path.replace('\\', "/").trim_start_matches('/').to_string();
+                
+                if !thumb_normalized.is_empty() && file_path_normalized == thumb_normalized {
+                    continue;
+                }
+                
+                if is_thumbnail_name(&item.file_path) || is_thumbnail_name(&item.original_filename) {
+                    continue;
+                }
+                
+                if let Some(src_path) = find_file_in_dir(&temp_dir, &item.file_path) {
+                    let ext = src_path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("jpg")
+                        .to_lowercase();
+                    
+                    let is_video = is_video_ext(&ext) || item.mime_type.starts_with("video/");
+                    
+                    if !is_media_ext(&ext) && !is_video {
+                        continue;
+                    }
+                    
+                    if !is_video && is_image_ext(&ext) && is_thumbnail_by_resolution(&src_path, min_side, min_pixels) {
+                        continue;
+                    }
+                    
+                    let entry = grouped.entry(item.playlist_item_id)
+                        .or_insert_with(|| (item.label.clone(), Vec::new(), Vec::new()));
+                    
+                    if is_video {
+                        entry.2.push(src_path);
+                    } else {
+                        entry.1.push(src_path);
+                    }
+                }
+            }
+            
+            // Processar em ordem
+            let mut ordered_ids: Vec<i64> = grouped.keys().cloned().collect();
+            ordered_ids.sort();
+            
+            for id in ordered_ids {
+                if let Some((_label, images, videos)) = grouped.get(&id) {
+                    let mut chosen_path: Option<PathBuf> = None;
+                    let mut is_video = false;
+                    
+                    // Prioridade: vídeos primeiro
+                    if !videos.is_empty() {
+                        chosen_path = videos.iter().max_by_key(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0)).cloned();
+                        is_video = true;
+                    } else if !images.is_empty() {
+                        let mut best_image: Option<PathBuf> = None;
+                        let mut best_pixels = 0u64;
+                        
+                        for img_path in images {
+                            if !is_thumbnail_by_resolution(img_path, min_side, min_pixels) {
+                                let (w, h, px) = get_image_resolution(img_path);
+                                if px > best_pixels {
+                                    best_pixels = px;
+                                    best_image = Some(img_path.clone());
+                                }
+                            }
+                        }
+                        
+                        chosen_path = best_image.or_else(|| images.first().cloned());
+                        is_video = false;
+                    }
+                    
+                    if let Some(src_path) = chosen_path {
+                        let ext = src_path.extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("jpg")
+                            .to_lowercase();
+                        
+                        let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+                        
+                        if is_video {
+                            // Processar vídeo
+                            let dest_path = videos_dir.join(&new_filename);
+                            let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
+                            
+                            let _ = fs::copy(&src_path, &dest_path);
+                            
+                            let video_duration = get_video_duration(&src_path);
+                            let seek_time = if let Some(dur) = video_duration {
+                                let mid = dur / 2.0;
+                                format!("{:.2}", mid)
+                            } else {
+                                "00:00:10.000".to_string()
+                            };
+                            
+                            let status = std::process::Command::new("ffmpeg")
+                                .args(&[
+                                    "-i", src_path.to_str().unwrap_or(""),
+                                    "-ss", &seek_time,
+                                    "-vframes", "1",
+                                    "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+                                    "-update", "1",
+                                    thumb_path.to_str().unwrap_or(""),
+                                    "-y"
+                                ])
+                                .status();
+                            
+                            if status.is_err() || !thumb_path.exists() {
+                                create_placeholder_thumbnail(&thumb_path);
+                            }
+                            
+                            new_slides.push(Slide {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                filename: new_filename,
+                                order: new_slides.len(),
+                                is_video: true,
+                                duration: video_duration,
+                            });
+                            
+                        } else {
+                            // Processar imagem
+                            let dest_path = images_dir.join(&new_filename);
+                            let thumb_path = thumbs_dir.join(&new_filename);
+                            
+                            if let Ok(img) = image::open(&src_path) {
+                                let (width, height) = img.dimensions();
+                                let optimized = if width > 1920 || height > 1080 {
+                                    let aspect = width as f32 / height as f32;
+                                    let new_h = 1080u32;
+                                    let new_w = (new_h as f32 * aspect) as u32;
+                                    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                                } else {
+                                    img
+                                };
+                                let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
+                                let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                                let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+                            } else {
+                                fs::copy(&src_path, &dest_path).ok();
+                                fs::copy(&src_path, &thumb_path).ok();
                             }
                             
                             new_slides.push(Slide {
@@ -2368,29 +2561,97 @@ fn start_upload_server(
                         }
                     }
                 }
-
-                if !new_slides.is_empty() {
-                    let mut app_state = state.write().await;
-                    let pres_id = uuid::Uuid::new_v4().to_string();
-                    app_state.presentations.push(Presentation {
-                        id: pres_id.clone(),
-                        name: session_name.unwrap(),
-                        slides: new_slides,
-                        active: false,
-                    });
-                    save_state_to_disk(&app_state, &handle);
-                    sessions.sessions.lock().unwrap().remove(&token);
-                    
-                    handle.emit("tablet-upload-complete", &pres_id).ok();
+            }
+        }
+    } else {
+        // Fallback: Sem DB, processar todos os arquivos de mídia
+        let mut all_media = Vec::new();
+        copy_media_fallback(&temp_dir, &mut all_media);
+        
+        for src_path in &all_media {
+            let ext = src_path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("jpg")
+                .to_lowercase();
+            
+            let is_video = is_video_ext(&ext);
+            
+            if is_video {
+                let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+                let dest_path = videos_dir.join(&new_filename);
+                let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
+                
+                let _ = fs::copy(src_path, &dest_path);
+                
+                let video_duration = get_video_duration(src_path);
+                let seek_time = if let Some(dur) = video_duration {
+                    let mid = dur / 2.0;
+                    format!("{:.2}", mid)
+                } else {
+                    "00:00:10.000".to_string()
+                };
+                
+                let status = std::process::Command::new("ffmpeg")
+                    .args(&[
+                        "-i", src_path.to_str().unwrap_or(""),
+                        "-ss", &seek_time,
+                        "-vframes", "1",
+                        "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+                        "-update", "1",
+                        thumb_path.to_str().unwrap_or(""),
+                        "-y"
+                    ])
+                    .status();
+                
+                if status.is_err() || !thumb_path.exists() {
+                    create_placeholder_thumbnail(&thumb_path);
                 }
-
-                Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"success": true})))
-            });
-
-        let routes = upload_page.or(upload_api);
-        println!("📱 Servidor de Upload: http://0.0.0.0:20779");
-        warp::serve(routes).run(([0, 0, 0, 0], 20779)).await;
-    });
+                
+                new_slides.push(Slide {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    filename: new_filename,
+                    order: new_slides.len(),
+                    is_video: true,
+                    duration: video_duration,
+                });
+                
+            } else if is_image_ext(&ext) && !is_thumbnail_by_resolution(src_path, min_side, min_pixels) {
+                let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+                let dest_path = images_dir.join(&new_filename);
+                let thumb_path = thumbs_dir.join(&new_filename);
+                
+                if let Ok(img) = image::open(src_path) {
+                    let (width, height) = img.dimensions();
+                    let optimized = if width > 1920 || height > 1080 {
+                        let aspect = width as f32 / height as f32;
+                        let new_h = 1080u32;
+                        let new_w = (new_h as f32 * aspect) as u32;
+                        img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                    } else {
+                        img
+                    };
+                    let _ = optimized.save_with_format(&dest_path, image::ImageFormat::Jpeg);
+                    let thumb = optimized.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                    let _ = thumb.save_with_format(&thumb_path, image::ImageFormat::Jpeg);
+                } else {
+                    fs::copy(src_path, &dest_path).ok();
+                    fs::copy(src_path, &thumb_path).ok();
+                }
+                
+                new_slides.push(Slide {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    filename: new_filename,
+                    order: new_slides.len(),
+                    is_video: false,
+                    duration: None,
+                });
+            }
+        }
+    }
+    
+    let _ = fs::remove_dir_all(&temp_dir);
+    
+    Ok(new_slides)
 }
 
 // ZOOM BOT COMANDOS
@@ -2848,6 +3109,36 @@ async fn set_video_playback(
     Ok(())
 }
 
+#[tauri::command]
+async fn video_finished(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, SharedState>,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,
+) -> Result<(), String> {
+    println!("🎬 Vídeo finalizado - aplicando blackout e voltando para JW Library");
+    
+    // Aplicar blackout no estado
+    {
+        let mut app_state = state.write().await;
+        app_state.is_blackout = true;
+        app_state.current_slide_index = 0;
+    }
+    
+    // Voltar para JW Library (isso já aplica blackout e esconde a tela)
+    switch_to_jw_library_internal(&app_handle).await?;
+    
+    // Emitir evento para o DisplayPage (via Tauri)
+    app_handle.emit("video-finished", ()).map_err(|e| e.to_string())?;
+    
+    // Broadcast via WebSocket para todos os clientes
+    let ws_msg = serde_json::json!({
+        "type": "video_finished",
+    }).to_string();
+    ws_clients.broadcast(ws_msg);
+    
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -2930,7 +3221,7 @@ pub fn run() {
             extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
             get_countdown_state, stop_countdown, ensure_display_window, generate_upload_qr,
             zoom_get_config, zoom_save_config, zoom_start_bot, zoom_stop_bot, zoom_get_state,
-            set_video_playback,
+            set_video_playback, video_finished,
         ])
         .run(tauri::generate_context!())
         .expect("erro");

@@ -192,6 +192,14 @@ function ControlPage() {
             setVideoPaused(data.paused);
           }
 
+          // 🔥 NOVO: Handler para vídeo finalizado
+          if (data.type === 'video_finished') {
+            console.log('🎬 Vídeo finalizado via WebSocket - aplicando blackout');
+            setIsBlackout(true);
+            setVideoPaused(false);
+            // O backend já aplicou o blackout, apenas atualizamos o estado local
+          }
+
           if (data.type === 'zoom_hand_raised') {
             const { name, timestamp } = data;
             const id = Date.now() + '-' + (notificationIdCounter.current++);
