@@ -13,28 +13,36 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 os.dup2(sys.stdout.fileno(), sys.stderr.fileno())
 
 async def verificar_conexao(page):
+    """Verifica se o bot ainda está na reunião verificando o botão Participants"""
     try:
         status = await page.evaluate("""
             () => {
+                // 🔥 Principal indicador: botão Participants
+                const participantsBtn = document.querySelector(
+                    'button[aria-label*="participants" i], button[aria-label*="participants list" i]'
+                );
+                
+                // Verifica se o botão Leave existe (indicador secundário)
                 const leaveBtn = document.querySelector('button[aria-label="Leave"]');
-                const url = window.location.href;
-                const naReuniao = url.includes('/wc/') || url.includes('meeting');
-                const errorMsg = document.querySelector('[class*="error"], [class*="disconnect"]');
                 
                 return {
-                    leaveBtn: !!leaveBtn,
-                    naReuniao: naReuniao,
-                    errorMsg: !!errorMsg,
-                    url: url
+                    hasParticipantsBtn: !!participantsBtn,
+                    hasLeaveBtn: !!leaveBtn
                 };
             }
         """)
         
-        conectado = status['leaveBtn'] and not status['errorMsg'] and status['naReuniao']
-        return {'conectado': conectado, 'status': status}
+        # 🔥 Está conectado se tiver botão Participants OU Leave
+        conectado = status['hasParticipantsBtn'] or status['hasLeaveBtn']
+        
+        return {
+            'conectado': conectado,
+            'hasParticipantsBtn': status['hasParticipantsBtn'],
+            'hasLeaveBtn': status['hasLeaveBtn']
+        }
     except Exception as e:
-        print(f"[Bot] Erro ao verificar conexao: {e}")
-        return {'conectado': False, 'status': {'error': str(e)}}
+        print(f"[Bot] ❌ Erro ao verificar conexao: {e}")
+        return {'conectado': False, 'hasParticipantsBtn': False, 'hasLeaveBtn': False}
 
 async def abrir_painel_participantes(page):
     try:
@@ -89,13 +97,11 @@ async def mutar_audio_e_video(page):
         # 🔥 Desligar a câmera
         print("[Bot] Desligando câmera...")
         try:
-            # Usando o seletor fornecido
             video_btn = page.locator("#preview-video-control-button")
             if await video_btn.is_visible(timeout=2000):
                 await video_btn.click()
                 print("[Bot] ✅ Câmera desligada!")
             else:
-                # Tentar por atributo aria-label
                 video_btn = page.locator('button[aria-label*="camera" i], button[aria-label*="câmera" i], button[aria-label*="video" i]').first
                 if await video_btn.is_visible(timeout=2000):
                     await video_btn.click()
@@ -108,13 +114,11 @@ async def mutar_audio_e_video(page):
         # 🔥 Mutar o microfone
         print("[Bot] Mutando microfone...")
         try:
-            # Usando o seletor fornecido
             audio_btn = page.locator("#preview-audio-control-button")
             if await audio_btn.is_visible(timeout=2000):
                 await audio_btn.click()
                 print("[Bot] ✅ Microfone mutado!")
             else:
-                # Tentar por atributo aria-label
                 audio_btn = page.locator('button[aria-label*="microfone" i], button[aria-label*="mute" i], button[aria-label*="audio" i]').first
                 if await audio_btn.is_visible(timeout=2000):
                     await audio_btn.click()
@@ -348,6 +352,7 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
         
         reconexoes = 0
         MAX_RECONEXOES = 5
+        estava_conectado = False
         
         try:
             sucesso = await fazer_login(page, meeting_id, passcode, nome)
@@ -458,20 +463,25 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
             while True:
                 await asyncio.sleep(30)
                 
+                # 🔥 VERIFICAÇÃO SIMPLES: apenas botão Participants e Leave
                 resultado = await verificar_conexao(page)
+                conectado = resultado['conectado']
                 
-                if not resultado['conectado']:
+                # 🔥 Se não está conectado, mas estava antes, é uma desconexão
+                if not conectado and estava_conectado:
                     timestamp = datetime.now().strftime("%H:%M:%S")
-                    print(f"\nCONEXAO PERDIDA! [{timestamp}]")
-                    print(f"[Bot] Status: {resultado['status']}")
+                    print(f"\n❌ CONEXAO PERDIDA! [{timestamp}]")
+                    print(f"[Bot] Status detalhado:")
+                    print(f"  - ParticipantsBtn: {resultado.get('hasParticipantsBtn', False)}")
+                    print(f"  - LeaveBtn: {resultado.get('hasLeaveBtn', False)}")
                     
                     if reconexoes >= MAX_RECONEXOES:
-                        print(f"[Bot] Numero maximo de reconexoes atingido ({MAX_RECONEXOES})")
+                        print(f"[Bot] ❌ Numero maximo de reconexoes atingido ({MAX_RECONEXOES})")
                         print("[Bot] Encerrando...")
                         break
                     
                     reconexoes += 1
-                    print(f"[Bot] Tentativa de reconexao {reconexoes}/{MAX_RECONEXOES} em 10 segundos...")
+                    print(f"[Bot] 🔄 Tentativa de reconexao {reconexoes}/{MAX_RECONEXOES} em 10 segundos...")
                     
                     await asyncio.sleep(10)
                     
@@ -479,8 +489,9 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
                     sucesso = await fazer_login(page, meeting_id, passcode, nome)
                     
                     if sucesso:
-                        print("[Bot] Reconectado com sucesso!")
+                        print("[Bot] ✅ Reconectado com sucesso!")
                         reconexoes = 0
+                        estava_conectado = True
                         
                         await asyncio.sleep(3)
                         painel_ok = await abrir_painel_participantes(page)
@@ -563,11 +574,20 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
                                 }
                             """)
                             
-                            print("[Bot] Monitoramento reconfigurado!")
+                            print("[Bot] ✅ Monitoramento reconfigurado!")
                         else:
-                            print("[Bot] Nao foi possivel reabrir o painel")
+                            print("[Bot] ⚠️ Nao foi possivel reabrir o painel")
                     else:
-                        print(f"[Bot] Falha na reconexao {reconexoes}")
+                        print(f"[Bot] ❌ Falha na reconexao {reconexoes}")
+                        break
+                
+                # 🔥 Atualiza o estado de conexão
+                estava_conectado = conectado
+                
+                # 🔥 Mostra status a cada 2 minutos
+                if int(datetime.now().timestamp()) % 120 == 0:
+                    status_icon = '✅' if conectado else '❌'
+                    print(f"[Bot] ℹ️ Status: {status_icon} {'Conectado' if conectado else 'Desconectado'} | Reconexoes: {reconexoes}")
                 
         except KeyboardInterrupt:
             print("\n[Bot] Interrompido pelo usuario")
