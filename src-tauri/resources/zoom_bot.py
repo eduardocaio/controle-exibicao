@@ -12,17 +12,18 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 # 🔥 REDIRECIONAR STDERR PARA STDOUT
 os.dup2(sys.stdout.fileno(), sys.stderr.fileno())
 
+# Variável global para controlar o loop de monitoramento
+monitoramento_ativo = True
+funcoes_registradas = False  # 🔥 Flag para controlar o registro das funções
+
 async def verificar_conexao(page):
     """Verifica se o bot ainda está na reunião verificando o botão Participants"""
     try:
         status = await page.evaluate("""
             () => {
-                // 🔥 Principal indicador: botão Participants
                 const participantsBtn = document.querySelector(
                     'button[aria-label*="participants" i], button[aria-label*="participants list" i]'
                 );
-                
-                // Verifica se o botão Leave existe (indicador secundário)
                 const leaveBtn = document.querySelector('button[aria-label="Leave"]');
                 
                 return {
@@ -32,7 +33,6 @@ async def verificar_conexao(page):
             }
         """)
         
-        # 🔥 Está conectado se tiver botão Participants OU Leave
         conectado = status['hasParticipantsBtn'] or status['hasLeaveBtn']
         
         return {
@@ -291,7 +291,180 @@ async def fazer_login(page, meeting_id, passcode, nome):
         traceback.print_exc()
         return False
 
+async def monitorar_maos_levantadas(page):
+    """Monitora continuamente as mãos levantadas com reconexão automática"""
+    global monitoramento_ativo, funcoes_registradas
+    
+    # 🔥 Registra as funções APENAS UMA VEZ
+    if not funcoes_registradas:
+        try:
+            async def notificar_mao_levantada(nome):
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"MAO LEVANTADA: {nome} [{timestamp}]")
+            
+            async def notificar_mao_abaixada(nome):
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"MAO ABAIXADA: {nome} [{timestamp}]")
+            
+            await page.expose_function("notificar_mao_levantada", notificar_mao_levantada)
+            await page.expose_function("notificar_mao_abaixada", notificar_mao_abaixada)
+            funcoes_registradas = True
+            print("[Bot] ✅ Funções de notificação registradas")
+        except Exception as e:
+            print(f"[Bot] ⚠️ Erro ao registrar funções: {e}")
+    
+    while monitoramento_ativo:
+        try:
+            # Verifica se a página ainda está válida
+            try:
+                await page.evaluate("() => { return 1; }")
+            except:
+                print("[Bot] ⚠️ Página fechada ou inválida. Parando monitoramento.")
+                break
+            
+            # 🔥 RECONFIGURA O MONITORAMENTO A CADA 15 SEGUNDOS
+            # Verifica se o painel de participantes está aberto
+            participantes_visiveis = await page.evaluate("""
+                () => {
+                    const items = document.querySelectorAll(
+                        '.participants-item, .wc-participants-item, [class*="participants-item"], [role="listitem"]'
+                    );
+                    return Array.from(items).filter(item => item.offsetParent !== null).length;
+                }
+            """)
+            
+            if participantes_visiveis == 0:
+                # Tenta reabrir o painel
+                await abrir_painel_participantes(page)
+            
+            # 🔥 RECONFIGURA O SCRIPT DE MONITORAMENTO (sem registrar as funções novamente)
+            await page.evaluate("""
+                () => {
+                    // Remove observers antigos se existirem
+                    if (window.maoObserver) {
+                        window.maoObserver.disconnect();
+                    }
+                    if (window.maoObserverContainer) {
+                        window.maoObserverContainer.disconnect();
+                    }
+                    if (window.maoInterval) {
+                        clearInterval(window.maoInterval);
+                    }
+                    
+                    let maosLevantadas = new Set();
+                    
+                    function obterParticipantesVisiveis() {
+                        const todos = document.querySelectorAll(
+                            '.participants-item, .wc-participants-item, [class*="participants-item"], [role="listitem"]'
+                        );
+                        return Array.from(todos).filter(item => item.offsetParent !== null);
+                    }
+                    
+                    function obterNome(participante) {
+                        const nomeElemento = participante.querySelector(
+                            '.participants-item__display-name, .wc-participants-item__name, [class*="name"]'
+                        );
+                        return nomeElemento ? nomeElemento.innerText.trim() : null;
+                    }
+                    
+                    function temMaoLevantada(participante) {
+                        return participante.querySelector(
+                            '[aria-label*="mao"], [aria-label*="hand"], .hand-raised-icon, [class*="hand-raised"], [class*="handRaised"], img[src*="hand"]'
+                        );
+                    }
+                    
+                    function checarMaos() {
+                        try {
+                            const participantes = obterParticipantesVisiveis();
+                            const maosAtuais = new Set();
+                            
+                            participantes.forEach(participante => {
+                                const nome = obterNome(participante);
+                                if (nome && temMaoLevantada(participante)) {
+                                    maosAtuais.add(nome);
+                                }
+                            });
+                            
+                            // Notifica novas mãos
+                            maosAtuais.forEach(nome => {
+                                if (!maosLevantadas.has(nome)) {
+                                    try {
+                                        window.notificar_mao_levantada(nome);
+                                    } catch(e) {}
+                                }
+                            });
+                            
+                            // Notifica mãos abaixadas
+                            maosLevantadas.forEach(nome => {
+                                if (!maosAtuais.has(nome)) {
+                                    try {
+                                        window.notificar_mao_abaixada(nome);
+                                    } catch(e) {}
+                                }
+                            });
+                            
+                            maosLevantadas = maosAtuais;
+                        } catch(e) {
+                            // Erro silencioso para não quebrar o monitoramento
+                        }
+                    }
+                    
+                    // 🔥 OBSERVA A PÁGINA INTEIRA
+                    const observer = new MutationObserver(() => {
+                        clearTimeout(window.maoCheckTimeout);
+                        window.maoCheckTimeout = setTimeout(checarMaos, 300);
+                    });
+                    
+                    observer.observe(document.body, { 
+                        attributes: true, 
+                        childList: true, 
+                        subtree: true 
+                    });
+                    
+                    // Também observa especificamente o container de participantes
+                    const listaContainer = document.querySelector(
+                        '.participants-list, .wc-participants-list, [aria-label="Participants list"], [aria-label="Lista de participantes"]'
+                    );
+                    
+                    if (listaContainer) {
+                        const observerContainer = new MutationObserver(() => {
+                            clearTimeout(window.maoCheckTimeout);
+                            window.maoCheckTimeout = setTimeout(checarMaos, 300);
+                        });
+                        observerContainer.observe(listaContainer, { 
+                            attributes: true, 
+                            childList: true, 
+                            subtree: true 
+                        });
+                        window.maoObserverContainer = observerContainer;
+                    }
+                    
+                    window.maoObserver = observer;
+                    
+                    // 🔥 VERIFICAÇÃO PERIÓDICA FORÇADA (a cada 3 segundos)
+                    window.maoInterval = setInterval(checarMaos, 3000);
+                    
+                    // Primeira verificação imediata
+                    setTimeout(checarMaos, 500);
+                    setTimeout(checarMaos, 2000);
+                }
+            """)
+            
+            # 🔥 Aguarda antes de reconfigurar novamente (15 segundos)
+            for _ in range(15):
+                if not monitoramento_ativo:
+                    break
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            print(f"[Bot] ⚠️ Erro no monitoramento: {e}")
+            await asyncio.sleep(5)
+
 async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
+    global monitoramento_ativo, funcoes_registradas
+    monitoramento_ativo = True
+    funcoes_registradas = False
+    
     print(f"[Bot] Iniciando bot com:")
     print(f"  Meeting ID: {meeting_id}")
     print(f"  Nome: {nome}")
@@ -372,89 +545,8 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
             else:
                 print("[Bot] Nao foi possivel abrir o painel")
             
-            # Configurar monitoramento
-            async def notificar_mao_levantada(nome):
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(f"MAO LEVANTADA: {nome} [{timestamp}]")
-            
-            async def notificar_mao_abaixada(nome):
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(f"MAO ABAIXADA: {nome} [{timestamp}]")
-            
-            await page.expose_function("notificar_mao_levantada", notificar_mao_levantada)
-            await page.expose_function("notificar_mao_abaixada", notificar_mao_abaixada)
-            
-            await page.evaluate("""
-                () => {
-                    let maosLevantadas = new Set();
-                    
-                    function obterParticipantesVisiveis() {
-                        const todos = document.querySelectorAll(
-                            '.participants-item, .wc-participants-item, [class*="participants-item"], [role="listitem"]'
-                        );
-                        return Array.from(todos).filter(item => item.offsetParent !== null);
-                    }
-                    
-                    function obterNome(participante) {
-                        const nomeElemento = participante.querySelector(
-                            '.participants-item__display-name, .wc-participants-item__name, [class*="name"]'
-                        );
-                        return nomeElemento ? nomeElemento.innerText.trim() : null;
-                    }
-                    
-                    function temMaoLevantada(participante) {
-                        return participante.querySelector(
-                            '[aria-label*="mao"], [aria-label*="hand"], .hand-raised-icon, [class*="hand-raised"], [class*="handRaised"], img[src*="hand"]'
-                        );
-                    }
-                    
-                    function checarMaos() {
-                        const participantes = obterParticipantesVisiveis();
-                        const maosAtuais = new Set();
-                        
-                        participantes.forEach(participante => {
-                            const nome = obterNome(participante);
-                            if (nome && temMaoLevantada(participante)) {
-                                maosAtuais.add(nome);
-                            }
-                        });
-                        
-                        maosAtuais.forEach(nome => {
-                            if (!maosLevantadas.has(nome)) {
-                                window.notificar_mao_levantada(nome);
-                            }
-                        });
-                        
-                        maosLevantadas.forEach(nome => {
-                            if (!maosAtuais.has(nome)) {
-                                window.notificar_mao_abaixada(nome);
-                            }
-                        });
-                        
-                        maosLevantadas = maosAtuais;
-                    }
-                    
-                    const listaContainer = document.querySelector(
-                        '.participants-list, .wc-participants-list, [aria-label="Participants list"], [aria-label="Lista de participantes"]'
-                    );
-                    
-                    const alvo = listaContainer || document.body;
-                    
-                    const observer = new MutationObserver(() => {
-                        clearTimeout(window.maoCheckTimeout);
-                        window.maoCheckTimeout = setTimeout(checarMaos, 500);
-                    });
-                    
-                    observer.observe(alvo, { 
-                        attributes: true, 
-                        childList: true, 
-                        subtree: true 
-                    });
-                    
-                    setInterval(checarMaos, 3000);
-                    setTimeout(checarMaos, 2000);
-                }
-            """)
+            # 🔥 INICIA O MONITORAMENTO CONTÍNUO DE MÃOS
+            monitor_task = asyncio.create_task(monitorar_maos_levantadas(page))
             
             print("[Bot] Sistema de monitoramento ativo!")
             print("[Bot] Monitorando conexao a cada 30 segundos...")
@@ -463,7 +555,7 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
             while True:
                 await asyncio.sleep(30)
                 
-                # 🔥 VERIFICAÇÃO SIMPLES: apenas botão Participants e Leave
+                # 🔥 VERIFICAÇÃO DE CONEXÃO
                 resultado = await verificar_conexao(page)
                 conectado = resultado['conectado']
                 
@@ -499,82 +591,9 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
                         if painel_ok:
                             print("[Bot] Painel reaberto!")
                             
-                            await page.expose_function("notificar_mao_levantada", notificar_mao_levantada)
-                            await page.expose_function("notificar_mao_abaixada", notificar_mao_abaixada)
-                            
-                            await page.evaluate("""
-                                () => {
-                                    let maosLevantadas = new Set();
-                                    
-                                    function obterParticipantesVisiveis() {
-                                        const todos = document.querySelectorAll(
-                                            '.participants-item, .wc-participants-item, [class*="participants-item"], [role="listitem"]'
-                                        );
-                                        return Array.from(todos).filter(item => item.offsetParent !== null);
-                                    }
-                                    
-                                    function obterNome(participante) {
-                                        const nomeElemento = participante.querySelector(
-                                            '.participants-item__display-name, .wc-participants-item__name, [class*="name"]'
-                                        );
-                                        return nomeElemento ? nomeElemento.innerText.trim() : null;
-                                    }
-                                    
-                                    function temMaoLevantada(participante) {
-                                        return participante.querySelector(
-                                            '[aria-label*="mao"], [aria-label*="hand"], .hand-raised-icon, [class*="hand-raised"], [class*="handRaised"], img[src*="hand"]'
-                                        );
-                                    }
-                                    
-                                    function checarMaos() {
-                                        const participantes = obterParticipantesVisiveis();
-                                        const maosAtuais = new Set();
-                                        
-                                        participantes.forEach(participante => {
-                                            const nome = obterNome(participante);
-                                            if (nome && temMaoLevantada(participante)) {
-                                                maosAtuais.add(nome);
-                                            }
-                                        });
-                                        
-                                        maosAtuais.forEach(nome => {
-                                            if (!maosLevantadas.has(nome)) {
-                                                window.notificar_mao_levantada(nome);
-                                            }
-                                        });
-                                        
-                                        maosLevantadas.forEach(nome => {
-                                            if (!maosAtuais.has(nome)) {
-                                                window.notificar_mao_abaixada(nome);
-                                            }
-                                        });
-                                        
-                                        maosLevantadas = maosAtuais;
-                                    }
-                                    
-                                    const listaContainer = document.querySelector(
-                                        '.participants-list, .wc-participants-list, [aria-label="Participants list"], [aria-label="Lista de participantes"]'
-                                    );
-                                    
-                                    const alvo = listaContainer || document.body;
-                                    
-                                    const observer = new MutationObserver(() => {
-                                        clearTimeout(window.maoCheckTimeout);
-                                        window.maoCheckTimeout = setTimeout(checarMaos, 500);
-                                    });
-                                    
-                                    observer.observe(alvo, { 
-                                        attributes: true, 
-                                        childList: true, 
-                                        subtree: true 
-                                    });
-                                    
-                                    setInterval(checarMaos, 3000);
-                                    setTimeout(checarMaos, 2000);
-                                }
-                            """)
-                            
-                            print("[Bot] ✅ Monitoramento reconfigurado!")
+                            # 🔥 Reconfigura o monitoramento após reconexão
+                            # A task monitorar_maos_levantadas já vai reconfigurar automaticamente
+                            print("[Bot] ✅ Monitoramento será reconfigurado automaticamente!")
                         else:
                             print("[Bot] ⚠️ Nao foi possivel reabrir o painel")
                     else:
@@ -596,6 +615,11 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
             import traceback
             traceback.print_exc()
         finally:
+            monitoramento_ativo = False
+            try:
+                monitor_task.cancel()
+            except:
+                pass
             await browser.close()
             print(f"[Bot] Encerrado. Total de reconexoes: {reconexoes}")
 
