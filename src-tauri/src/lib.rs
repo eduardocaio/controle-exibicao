@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use chrono::Timelike;
 use local_ip_address::local_ip;
 use warp::Buf;
-use tokio::io::{BufReader, AsyncBufReadExt};
 use tokio::time::timeout;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,6 +81,18 @@ impl ZoomBotProcess {
             error: Arc::new(TokioMutex::new(None)),
             config: Arc::new(TokioMutex::new(ZoomBotConfig::default())),
             should_stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+struct VideoPlaybackState {
+    paused: Arc<AtomicBool>,
+}
+
+impl VideoPlaybackState {
+    fn new() -> Self {
+        Self {
+            paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -149,7 +160,9 @@ fn build_slides_json(slides: &Vec<Slide>, _app_handle: &tauri::AppHandle) -> Vec
         serde_json::json!({ 
             "id": sl.id, 
             "filename": sl.filename, 
-            "order": sl.order
+            "order": sl.order,
+            "is_video": sl.is_video,
+            "duration": sl.duration,  // 🔥 Envia duração
         })
     }).collect()
 }
@@ -175,6 +188,11 @@ fn is_media_ext(ext: &str) -> bool {
 fn is_image_ext(ext: &str) -> bool {
     let ext = ext.trim_start_matches('.').to_lowercase();
     IMG_EXTS.contains(&ext.as_str())
+}
+
+fn is_video_ext(ext: &str) -> bool {
+    let ext = ext.to_lowercase();
+    matches!(ext.as_str(), "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" | "ogv" | "wmv" | "flv" | "3gp")
 }
 
 fn is_thumbnail_name(path: &str) -> bool {
@@ -394,6 +412,89 @@ fn copy_media_fallback(dir: &PathBuf, result: &mut Vec<PathBuf>) {
     }
 }
 
+// 🔥 NOVA FUNÇÃO: Obter duração do vídeo usando ffprobe
+fn get_video_duration(video_path: &PathBuf) -> Option<f64> {
+    let output = std::process::Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .ok()?;
+    
+    if output.status.success() {
+        let duration_str = String::from_utf8_lossy(&output.stdout);
+        duration_str.trim().parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+// 🔥 NOVA FUNÇÃO: Criar thumbnail placeholder
+fn create_placeholder_thumbnail(thumb_path: &PathBuf) {
+    use image::{ImageBuffer, Rgb};
+    
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(400, 300, Rgb([30, 30, 40]));
+    
+    // Desenha um símbolo de play (triângulo)
+    let center_x = 200;
+    let center_y = 150;
+    
+    // Triângulo simples
+    for y in 0..80 {
+        let y_offset = y as i32 - 40;
+        let half_width = 40 - y_offset.abs();
+        if half_width > 0 {
+            for x in (center_x as i32 - half_width)..(center_x as i32 + half_width) {
+                let px = x as u32;
+                let py = (center_y as i32 + y_offset) as u32;
+                if px < 400 && py < 300 {
+                    img.put_pixel(px, py, Rgb([100, 100, 120]));
+                }
+            }
+        }
+    }
+    
+    let _ = img.save(thumb_path);
+}
+
+fn create_video_thumbnail(video_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
+    let thumb_path_jpg = thumb_path.with_extension("jpg");
+    
+    // Obtém duração do vídeo
+    let duration = get_video_duration(video_path);
+    
+    // Pega o frame do meio do vídeo ou fallback para 10s
+    let seek_time = if let Some(dur) = duration {
+        let mid = dur / 2.0;
+        format!("{:.2}", mid)
+    } else {
+        "00:00:10.000".to_string()
+    };
+    
+    // Usa ffmpeg com -update 1 para salvar imagem única
+    let status = std::process::Command::new("ffmpeg")
+        .args(&[
+            "-i", video_path.to_str().unwrap_or(""),
+            "-ss", &seek_time,
+            "-vframes", "1",
+            "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+            "-update", "1",  // 🔥 IMPORTANTE
+            thumb_path_jpg.to_str().unwrap_or(""),
+            "-y"
+        ])
+        .status();
+    
+    if status.is_err() || !thumb_path_jpg.exists() {
+        // Fallback: criar imagem placeholder
+        create_placeholder_thumbnail(&thumb_path_jpg);
+    }
+    
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_app_data_dir(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(app_handle.path().app_data_dir().map_err(|e| e.to_string())?.to_string_lossy().to_string())
@@ -426,6 +527,7 @@ async fn create_presentation(
     Ok(id)
 }
 
+// CORREÇÃO para delete_presentation (linha ~537)
 #[tauri::command]
 async fn delete_presentation(
     presentation_id: String,
@@ -437,8 +539,28 @@ async fn delete_presentation(
     
     if let Some(pres) = app_state.presentations.iter().find(|p| p.id == presentation_id) {
         for slide in &pres.slides {
+            // 🔥 REMOVER IMAGEM
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
-            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+            
+            // 🔥 REMOVER THUMBNAIL (com extensão original)
+            let thumb_path = app_dir.join("thumbnails").join(&slide.filename);
+            let _ = fs::remove_file(&thumb_path);
+            
+            // 🔥 SE FOR VÍDEO, REMOVER TAMBÉM A THUMBNAIL COM EXTENSÃO .jpg
+            if slide.is_video {
+                // 🔥 CORREÇÃO: Usar Path para remover extensão
+                use std::path::Path;
+                let filename_without_ext = Path::new(&slide.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&slide.filename)
+                    .to_string();
+                let thumb_jpg_path = app_dir.join("thumbnails").join(format!("{}.jpg", filename_without_ext));
+                let _ = fs::remove_file(&thumb_jpg_path);
+            }
+            
+            // 🔥 REMOVER VÍDEO (se existir)
+            let _ = fs::remove_file(app_dir.join("videos").join(&slide.filename));
         }
     }
     
@@ -511,47 +633,101 @@ async fn upload_images_to_presentation(
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let images_dir = app_dir.join("images");
     let thumbs_dir = app_dir.join("thumbnails");
+    let videos_dir = app_dir.join("videos");
     fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
     
     let mut new_slides = Vec::new();
     for file_path in &file_paths {
         let original_path = PathBuf::from(file_path);
         let extension = original_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let is_video = is_video_ext(&extension);
         let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), extension);
-        let dest_path = images_dir.join(&new_filename);
-        let thumb_path = thumbs_dir.join(&new_filename);
         
-        if let Ok(img) = image::open(&original_path) {
-            let (width, height) = img.dimensions();
+        if is_video {
+            let dest_path = videos_dir.join(&new_filename);
+            let _ = fs::copy(&original_path, &dest_path);
             
-            let optimized_img = if width > 1920 || height > 1080 {
-                let aspect_ratio = width as f32 / height as f32;
-                let new_height = 1080u32;
-                let new_width = (new_height as f32 * aspect_ratio) as u32;
-                img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3)
+            // OBTÉM A DURAÇÃO DO VÍDEO
+            let video_duration = get_video_duration(&original_path);
+            
+            let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
+            let duration = get_video_duration(&original_path);
+            
+            let seek_time = if let Some(dur) = duration {
+                let mid = dur / 2.0;
+                format!("{:.2}", mid)
             } else {
-                img
+                "00:00:10.000".to_string()
             };
             
-            let _ = optimized_img.save_with_format(&dest_path, ImageFormat::Jpeg);
+            let status = std::process::Command::new("ffmpeg")
+                .args(&[
+                    "-i", original_path.to_str().unwrap_or(""),
+                    "-ss", &seek_time,
+                    "-vframes", "1",
+                    "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+                    "-update", "1",
+                    thumb_path.to_str().unwrap_or(""),
+                    "-y"
+                ])
+                .status();
             
-            let thumb = optimized_img.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
-            let _ = thumb.save_with_format(&thumb_path, ImageFormat::Jpeg);
+            if status.is_err() || !thumb_path.exists() {
+                create_placeholder_thumbnail(&thumb_path);
+            }
+            
+            // 🔥 CORREÇÃO: Criar o Slide diretamente com duração
+            new_slides.push(Slide {
+                id: uuid::Uuid::new_v4().to_string(),
+                filename: new_filename.clone(),
+                order: 0, // Será ajustado depois
+                is_video: true,
+                duration: video_duration,
+            });
+            
         } else {
-            let _ = fs::copy(&original_path, &dest_path);
-            let _ = fs::copy(&original_path, &thumb_path);
+            // Processar imagem normalmente
+            let dest_path = images_dir.join(&new_filename);
+            let thumb_path = thumbs_dir.join(&new_filename);
+            
+            if let Ok(img) = image::open(&original_path) {
+                let (width, height) = img.dimensions();
+                let optimized_img = if width > 1920 || height > 1080 {
+                    let aspect_ratio = width as f32 / height as f32;
+                    let new_height = 1080u32;
+                    let new_width = (new_height as f32 * aspect_ratio) as u32;
+                    img.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3)
+                } else {
+                    img
+                };
+                let _ = optimized_img.save_with_format(&dest_path, ImageFormat::Jpeg);
+                let thumb = optimized_img.resize_exact(400, 300, image::imageops::FilterType::Lanczos3);
+                let _ = thumb.save_with_format(&thumb_path, ImageFormat::Jpeg);
+            } else {
+                let _ = fs::copy(&original_path, &dest_path);
+                let _ = fs::copy(&original_path, &thumb_path);
+            }
+            
+            // Adiciona slide da imagem
+            new_slides.push(Slide {
+                id: uuid::Uuid::new_v4().to_string(),
+                filename: new_filename.clone(),
+                order: 0,
+                is_video: false,
+                duration: None,
+            });
         }
-        
-        new_slides.push((uuid::Uuid::new_v4().to_string(), new_filename));
     }
     
     let mut app_state = state.write().await;
     
     if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
         let start_order = pres.slides.len();
-        for (i, (id, filename)) in new_slides.into_iter().enumerate() {
-            pres.slides.push(Slide { id, filename, order: start_order + i });
+        for (i, mut slide) in new_slides.into_iter().enumerate() {
+            slide.order = start_order + i;
+            pres.slides.push(slide);
         }
         
         if pres.active {
@@ -586,8 +762,27 @@ async fn delete_slide_from_presentation(
     
     if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
         if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
+            // 🔥 REMOVER IMAGEM
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
-            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+            
+            // 🔥 REMOVER THUMBNAIL (com extensão original)
+            let thumb_path = app_dir.join("thumbnails").join(&slide.filename);
+            let _ = fs::remove_file(&thumb_path);
+            
+            // 🔥 SE FOR VÍDEO, REMOVER TAMBÉM A THUMBNAIL COM EXTENSÃO .jpg
+            if slide.is_video {
+                use std::path::Path;
+                let filename_without_ext = Path::new(&slide.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&slide.filename)
+                    .to_string();
+                let thumb_jpg_path = app_dir.join("thumbnails").join(format!("{}.jpg", filename_without_ext));
+                let _ = fs::remove_file(&thumb_jpg_path);
+            }
+            
+            // 🔥 REMOVER VÍDEO (se existir)
+            let _ = fs::remove_file(app_dir.join("videos").join(&slide.filename));
         }
         
         pres.slides.retain(|s| s.id != slide_id);
@@ -739,6 +934,8 @@ async fn extract_jw_playlist(
                                 id: uuid::Uuid::new_v4().to_string(),
                                 filename: new_filename,
                                 order: new_slides.len(),
+                                is_video: false,
+                                duration: None,
                             });
                         }
                     }
@@ -780,6 +977,8 @@ async fn extract_jw_playlist(
                 id: uuid::Uuid::new_v4().to_string(),
                 filename: new_filename,
                 order: new_slides.len(),
+                is_video: false,
+                duration: None,
             });
         }
     }
@@ -858,7 +1057,7 @@ async fn upload_images_direct(
     if let Some(pres) = app_state.presentations.first_mut() {
         let start_order = pres.slides.len();
         for (i, (id, filename)) in new_slides.into_iter().enumerate() {
-            pres.slides.push(Slide { id, filename, order: start_order + i });
+            pres.slides.push(Slide { id, filename, order: start_order + i, is_video: false, duration: None, });
         }
     }
     
@@ -880,8 +1079,27 @@ async fn delete_slide(slide_id: String, state: tauri::State<'_, SharedState>, ap
     
     for pres in &mut app_state.presentations {
         if let Some(slide) = pres.slides.iter().find(|s| s.id == slide_id) {
+            // 🔥 REMOVER IMAGEM
             let _ = fs::remove_file(app_dir.join("images").join(&slide.filename));
-            let _ = fs::remove_file(app_dir.join("thumbnails").join(&slide.filename));
+            
+            // 🔥 REMOVER THUMBNAIL (com extensão original)
+            let thumb_path = app_dir.join("thumbnails").join(&slide.filename);
+            let _ = fs::remove_file(&thumb_path);
+            
+            // 🔥 SE FOR VÍDEO, REMOVER TAMBÉM A THUMBNAIL COM EXTENSÃO .jpg
+            if slide.is_video {
+                use std::path::Path;
+                let filename_without_ext = Path::new(&slide.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&slide.filename)
+                    .to_string();
+                let thumb_jpg_path = app_dir.join("thumbnails").join(format!("{}.jpg", filename_without_ext));
+                let _ = fs::remove_file(&thumb_jpg_path);
+            }
+            
+            // 🔥 REMOVER VÍDEO (se existir)
+            let _ = fs::remove_file(app_dir.join("videos").join(&slide.filename));
         }
         pres.slides.retain(|s| s.id != slide_id);
         for (i, slide) in pres.slides.iter_mut().enumerate() { 
@@ -1208,8 +1426,8 @@ async fn send_operator_message(
         text: text.clone(),
         timestamp: now,
         acknowledged: false,
-        response_options, // ✅
-        selected_response: None, // ✅
+        response_options,
+        selected_response: None,
     };
     
     app_state.operator_message = Some(message.clone());
@@ -1220,7 +1438,7 @@ async fn send_operator_message(
         "id": message.id,
         "text": message.text,
         "timestamp": message.timestamp,
-        "response_options": message.response_options, 
+        "response_options": message.response_options,
     }).to_string();
     ws_clients.broadcast(ws_msg);
     
@@ -1263,7 +1481,6 @@ async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<
     
     if !countdown_running {
         if let Some(w) = app_handle.get_webview_window("display") {
-            // w.set_always_on_top(false).ok();
             w.hide().ok();
         }
         
@@ -1274,10 +1491,10 @@ async fn switch_to_jw_library_internal(app_handle: &tauri::AppHandle) -> Result<
             ])
             .spawn().ok();
         
-        app_handle.emit("switch-app", "jw").ok(); // ✅ Só emite "jw" se NÃO tem cronômetro
+        app_handle.emit("switch-app", "jw").ok();
     } else {
         show_display_window_internal(app_handle).await.ok();
-        app_handle.emit("switch-app", "sistema").ok(); // ✅ Emite "sistema" se tem cronômetro
+        app_handle.emit("switch-app", "sistema").ok();
     }
     
     Ok(())
@@ -1340,6 +1557,7 @@ async fn handle_ws_connection(
                 }
             });
 
+            // 🔥 AQUI É ONDE VOCÊ DEVE ADICIONAR O CÓDIGO
             {
                 let state = app_state.read().await;
                 let active_slides = get_active_slides(&state);
@@ -1380,11 +1598,19 @@ async fn handle_ws_connection(
                             "id": msg.id,
                             "text": msg.text,
                             "timestamp": msg.timestamp,
-                            "response_options": msg.response_options, // ✅
+                            "response_options": msg.response_options,
                         }).to_string();
                         let _ = s.send(Message::Text(op_msg)).await;
                     }
                 }
+                
+                let video_state = app_handle.state::<Arc<VideoPlaybackState>>();
+                let paused = video_state.paused.load(Ordering::SeqCst);
+                let video_playback_msg = serde_json::json!({
+                    "type": "video_playback_control",
+                    "paused": paused
+                }).to_string();
+                let _ = s.send(Message::Text(video_playback_msg)).await;
             }
 
             while let Some(msg_result) = receiver.next().await {
@@ -1535,7 +1761,6 @@ async fn handle_ws_connection(
                                         }).to_string())).await;
                                         
                                         drop(st);
-                                        // ✅ Emitir objeto com a resposta
                                         app_handle.emit("operator-message-acknowledged", &serde_json::json!({
                                             "response": selected
                                         })).ok();
@@ -1543,6 +1768,31 @@ async fn handle_ws_connection(
                                         st.operator_message = None;
                                     }
                                 }
+                                "video_playback" => {
+                                    if let Some(paused) = cmd["paused"].as_bool() {
+                                        // Atualizar estado de pausa
+                                        let video_state = app_handle.state::<Arc<VideoPlaybackState>>();
+                                        video_state.paused.store(paused, Ordering::SeqCst);
+                                        
+                                        // Emitir evento para o display
+                                        let _ = app_handle.emit("video-playback-control", &serde_json::json!({
+                                            "paused": paused
+                                        }));
+                                        
+                                        // 🔥 BROADCAST para TODOS os clientes conectados
+                                        let response = serde_json::json!({
+                                            "type": "video_playback_control",
+                                            "paused": paused
+                                        }).to_string();
+                                        
+                                        // Enviar para o cliente atual
+                                        let mut s = sender.lock().await;
+                                        let _ = s.send(Message::Text(response.clone())).await;
+                                        
+                                        // 🔥 ENVIAR PARA TODOS OS OUTROS CLIENTES via broadcast
+                                        clients.broadcast(response);
+                                    }
+                                },
                                 "refresh" => {},
                                 _ => {}
                             }
@@ -1692,6 +1942,26 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
                 }
             });
         
+        let serve_video = warp::path!("videos" / String)
+            .and(warp::get())
+            .and(handle_filter.clone())
+            .and_then(|filename: String, handle: tauri::AppHandle| async move {
+                let app_dir = handle.path().app_data_dir()
+                    .map_err(|_| warp::reject::not_found())?;
+                let video_path = app_dir.join("videos").join(&filename);
+                
+                if let Ok(bytes) = fs::read(&video_path) {
+                    let mime = from_path(&video_path).first_or_octet_stream();
+                    Ok::<_, warp::Rejection>(warp::http::Response::builder()
+                        .header("Content-Type", mime.as_ref())
+                        .header("Cache-Control", "public, max-age=3600")
+                        .body(bytes)
+                        .unwrap())
+                } else {
+                    Err(warp::reject::not_found())
+                }
+            });
+        
         let static_files = warp::any()
             .and(warp::path::full())
             .and_then(|path: warp::path::FullPath| async move {
@@ -1733,6 +2003,7 @@ fn start_http_control_server(app_state: SharedState, app_handle: tauri::AppHandl
             .or(post_command)
             .or(serve_image)
             .or(serve_thumbnail)
+            .or(serve_video)
             .or(static_files)
             .with(cors);
         
@@ -1745,7 +2016,6 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
     if let Some(w) = app_handle.get_webview_window("display") {
         w.unminimize().map_err(|e| e.to_string())?; 
         w.show().map_err(|e| e.to_string())?;
-        // w.set_always_on_top(true).map_err(|e| e.to_string())?; 
         w.set_fullscreen(true).map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?; 
         return Ok(());
@@ -1754,7 +2024,6 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
         .title("Tela de Exibição")
         .inner_size(800.0, 600.0)
         .decorations(false)
-        // .always_on_top(true)
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
@@ -1764,7 +2033,6 @@ async fn show_display_window_internal(app_handle: &tauri::AppHandle) -> Result<(
         window.set_position(tauri::PhysicalPosition::new(target.position().x, target.position().y)).map_err(|e| e.to_string())?;
         window.set_size(tauri::PhysicalSize::new(target.size().width, target.size().height)).map_err(|e| e.to_string())?;
     }
-    // window.set_always_on_top(true).map_err(|e| e.to_string())?; 
     window.set_fullscreen(true).map_err(|e| e.to_string())?;
     window.show().map_err(|e| e.to_string())?; 
     window.set_focus().map_err(|e| e.to_string())?;
@@ -1782,7 +2050,6 @@ async fn reorder_slides(
     let mut app_state = state.write().await;
     
     if let Some(pres) = app_state.presentations.iter_mut().find(|p| p.id == presentation_id) {
-        // Reordenar slides baseado na nova ordem de IDs
         let mut reordered = Vec::new();
         for (new_order, id) in slide_ids.iter().enumerate() {
             if let Some(slide) = pres.slides.iter().find(|s| &s.id == id) {
@@ -1792,7 +2059,6 @@ async fn reorder_slides(
             }
         }
         
-        // Manter slides que não estão na lista (não deveria acontecer, mas por segurança)
         for slide in &pres.slides {
             if !slide_ids.contains(&slide.id) {
                 let mut slide = slide.clone();
@@ -1803,7 +2069,6 @@ async fn reorder_slides(
         
         pres.slides = reordered;
         
-        // Se esta apresentação é a ativa, notificar tablets
         if pres.active {
             let active_slides = get_active_slides(&app_state);
             let msg = serde_json::json!({
@@ -1823,7 +2088,7 @@ async fn reorder_slides(
     Ok(())
 }
 
-// Adicione estes comandos no lib.rs
+// COMANDOS DE AGENDAMENTO E CRONÔMETRO
 
 #[tauri::command]
 async fn get_schedule_config(state: tauri::State<'_, SharedState>) -> Result<String, String> {
@@ -1865,7 +2130,6 @@ async fn stop_countdown(
     
     app_handle.emit("countdown-stop", ()).map_err(|e| e.to_string())?;
     
-    // Força ir para JW Library
     if let Some(w) = app_handle.get_webview_window("display") {
         w.set_always_on_top(false).ok();
         w.hide().ok();
@@ -1881,7 +2145,6 @@ async fn stop_countdown(
     Ok(())
 }
 
-// Função para iniciar o cronômetro (chamada internamente)
 fn start_countdown_internal(
     state: &mut AppState,
     target_time: String,
@@ -1904,7 +2167,6 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
             
             let mut app_state = state.write().await;
             
-            // Se estiver rodando, decrementar o contador
             if app_state.countdown.running {
                 if app_state.countdown.seconds_left > 0 {
                     app_state.countdown.seconds_left -= 1;
@@ -1935,7 +2197,6 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
                 continue;
             }
             
-            // Verificar agendamento
             let now = chrono::Local::now();
             let current_second = now.second();
             
@@ -1982,10 +2243,8 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
                     });
                     let _ = handle.emit("countdown-update", &countdown_json);
                     
-                    // ✅ ALTERNAR PARA A TELA DE IMAGENS (SISTEMA)
                     drop(app_state);
                     let _ = switch_to_sistema_internal(&handle).await;
-                    // Re-obter o lock após alternar
                     app_state = state.write().await;
                 }
             }
@@ -1995,7 +2254,6 @@ fn check_and_start_countdown(app_state: &SharedState, app_handle: &tauri::AppHan
 
 #[tauri::command]
 async fn ensure_display_window(app_handle: tauri::AppHandle) -> Result<(), String> {
-    // Apenas cria a janela se não existir, mas não a mostra
     if app_handle.get_webview_window("display").is_none() {
         let window = WebviewWindowBuilder::new(&app_handle, "display", tauri::WebviewUrl::App("/display".into()))
             .title("Tela de Exibição")
@@ -2064,9 +2322,7 @@ fn start_upload_server(
 
                 let mut new_slides = Vec::new();
 
-                // Processar cada parte do formulário
                 while let Some(Ok(part)) = form.next().await {
-                    // Obter o nome do arquivo
                     let filename = part.filename().unwrap_or("imagem.jpg").to_string();
                     let ext = PathBuf::from(&filename)
                         .extension()
@@ -2074,7 +2330,6 @@ fn start_upload_server(
                         .unwrap_or("jpg")
                         .to_lowercase();
                     
-                    // Coletar bytes manualmente usando stream
                     let mut data = Vec::new();
                     let mut part_stream = part.stream();
                     while let Some(result) = part_stream.next().await {
@@ -2092,9 +2347,7 @@ fn start_upload_server(
                         let dest = images_dir.join(&new_filename);
                         let thumb = thumbs_dir.join(&new_filename);
 
-                        // Escrever arquivo diretamente
                         if fs::write(&dest, &data).is_ok() {
-                            // Criar thumbnail
                             if let Ok(img) = image::open(&dest) {
                                 let (w, h) = img.dimensions();
                                 let opt = if w > 1920 || h > 1080 {
@@ -2102,7 +2355,6 @@ fn start_upload_server(
                                     img.resize_exact(new_w, 1080, image::imageops::FilterType::Lanczos3)
                                 } else { img };
                                 let _ = opt.resize_exact(400, 300, image::imageops::FilterType::Lanczos3).save_with_format(&thumb, image::ImageFormat::Jpeg);
-                                // Salvar imagem otimizada
                                 let _ = opt.save_with_format(&dest, image::ImageFormat::Jpeg);
                             }
                             
@@ -2110,6 +2362,8 @@ fn start_upload_server(
                                 id: uuid::Uuid::new_v4().to_string(),
                                 filename: new_filename,
                                 order: new_slides.len(),
+                                is_video: false,
+                                duration: None,
                             });
                         }
                     }
@@ -2127,7 +2381,6 @@ fn start_upload_server(
                     save_state_to_disk(&app_state, &handle);
                     sessions.sessions.lock().unwrap().remove(&token);
                     
-                    // ✅ Emitir evento para fechar o modal
                     handle.emit("tablet-upload-complete", &pres_id).ok();
                 }
 
@@ -2139,6 +2392,8 @@ fn start_upload_server(
         warp::serve(routes).run(([0, 0, 0, 0], 20779)).await;
     });
 }
+
+// ZOOM BOT COMANDOS
 
 #[tauri::command]
 async fn zoom_get_config(state: tauri::State<'_, SharedState>) -> Result<String, String> {
@@ -2173,7 +2428,6 @@ async fn zoom_start_bot(
     
     println!("🟢 zoom_start_bot: Iniciando...");
     
-    // Verificar se já está rodando
     {
         let process = zoom_bot.process.lock().await;
         if process.is_some() {
@@ -2182,13 +2436,11 @@ async fn zoom_start_bot(
         }
     }
     
-    // Limpar estado anterior
     zoom_bot.should_stop.store(false, Ordering::SeqCst);
     zoom_bot.connected.store(false, Ordering::SeqCst);
     *zoom_bot.error.lock().await = None;
     *zoom_bot.raised_hands.lock().await = Vec::new();
     
-    // Obter configuração
     let config = {
         let app_state = state.read().await;
         app_state.zoom_config.clone()
@@ -2204,11 +2456,9 @@ async fn zoom_start_bot(
     
     *zoom_bot.config.lock().await = config.clone();
     
-    // ===== LOCALIZAR O zoom_bot.exe =====
     let data_dir = get_data_dir(&app_handle);
     let zoom_bot_exe = data_dir.join("resources").join("zoom_bot.exe");
     
-    // Se não existir no diretório de dados, copiar da instalação
     if !zoom_bot_exe.exists() {
         println!("⚠️ zoom_bot.exe não encontrado em: {:?}", zoom_bot_exe);
         
@@ -2254,8 +2504,7 @@ async fn zoom_start_bot(
         println!("✅ zoom_bot.exe encontrado em: {:?}", zoom_bot_exe);
     }
     
-    // ===== CONSTRUIR COMANDO =====
-    let use_visible = false; // Modo visível para debug
+    let use_visible = false;
     
     let mut cmd = tokio::process::Command::new(&zoom_bot_exe);
     cmd.arg("--meeting").arg(&config.meeting_id);
@@ -2270,29 +2519,24 @@ async fn zoom_start_bot(
         println!("👻 Modo HEADLESS");
     }
     
-    // Definir diretório de trabalho
     if let Some(parent) = zoom_bot_exe.parent() {
         cmd.current_dir(parent);
         println!("📂 Diretório de trabalho: {:?}", parent);
     }
     
-    // 🔥 IMPORTANTE: Capturar stdout e stderr separadamente
     cmd.stdout(Stdio::piped())
        .stderr(Stdio::piped());
     
-    // ===== VARIÁVEIS DE AMBIENTE =====
     cmd.env("PLAYWRIGHT_BROWSERS_PATH", "0");
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.env("PYTHONWARNINGS", "ignore");
     
-    // Copiar PATH do sistema
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
     
-    // Adicionar o diretório atual ao PATH
     if let Some(parent) = zoom_bot_exe.parent() {
         if let Ok(current_path) = std::env::var("PATH") {
             let new_path = format!("{};{}", parent.display(), current_path);
@@ -2303,7 +2547,6 @@ async fn zoom_start_bot(
     println!("▶️ Executando: {} --meeting {} --passcode **** --name {}",
         zoom_bot_exe.display(), config.meeting_id, config.bot_name);
     
-    // ===== INICIAR PROCESSO =====
     let mut child = match cmd.spawn() {
         Ok(c) => {
             println!("✅ Processo iniciado com PID: {:?}", c.id());
@@ -2319,30 +2562,25 @@ async fn zoom_start_bot(
     let stdout = child.stdout.take().expect("Failed to capture stdout");
     let stderr = child.stderr.take().expect("Failed to capture stderr");
     
-    // ===== CLONAR ARCs =====
     let process_arc = zoom_bot.process.clone();
     let connected_arc = zoom_bot.connected.clone();
     let should_stop_arc = zoom_bot.should_stop.clone();
     let handle = app_handle.clone();
     let ws_clients_inner = ws_clients.inner().clone();
     
-    // 🔥 CLONE para usar nas tasks
     let zoom_bot_for_tasks = zoom_bot.inner().clone();
     
-    // Armazenar o processo
     *zoom_bot.process.lock().await = Some(child);
     
-    // ===== FUNÇÃO AUXILIAR para processar saída =====
     async fn process_zoom_output(
         line: &str,
         zoom_bot: &Arc<ZoomBotProcess>,
         handle: &tauri::AppHandle,
         ws_clients: &Arc<WsClients>,
-        source: &str, // "stdout" ou "stderr"
+        source: &str,
     ) {
         println!("[Zoom Bot {}] {}", source, line);
         
-        // ===== DETECTAR CONEXÃO BEM SUCEDIDA =====
         if line.contains("Login inicial bem sucedido!") 
             || line.contains("Reconectado com sucesso!") 
             || line.contains("Entrou na reuniao!") {
@@ -2357,7 +2595,6 @@ async fn zoom_start_bot(
             println!("📡 Evento zoom_connected enviado via WebSocket");
         }
         
-        // ===== DETECTAR CONEXÃO PERDIDA =====
         if line.contains("CONEXAO PERDIDA!") 
             || line.contains("Falha no login inicial!") {
             zoom_bot.connected.store(false, Ordering::SeqCst);
@@ -2370,7 +2607,6 @@ async fn zoom_start_bot(
             println!("📡 Evento zoom_disconnected enviado via WebSocket");
         }
         
-        // ===== DETECTAR MÃO LEVANTADA =====
         if line.contains("MAO LEVANTADA:") {
             if let Some(name) = line.split("MAO LEVANTADA:").nth(1) {
                 let name = name.trim().to_string();
@@ -2401,7 +2637,6 @@ async fn zoom_start_bot(
             }
         }
         
-        // ===== DETECTAR MÃO ABAIXADA =====
         if line.contains("MAO ABAIXADA:") {
             if let Some(name) = line.split("MAO ABAIXADA:").nth(1) {
                 let name = name.trim().to_string();
@@ -2423,7 +2658,6 @@ async fn zoom_start_bot(
             }
         }
         
-        // ===== DETECTAR ERRO FATAL =====
         if line.contains("[Bot] Erro:") 
             || line.contains("[Bot] Numero maximo de reconexoes")
             || line.contains("Traceback")
@@ -2437,7 +2671,6 @@ async fn zoom_start_bot(
             zoom_bot.should_stop.store(true, Ordering::SeqCst);
         }
         
-        // ===== VERIFICAR SE O BOT FOI ENCERRADO =====
         if line.contains("[Bot] Encerrado") || line.contains("[Bot] Interrompido") {
             zoom_bot.connected.store(false, Ordering::SeqCst);
             zoom_bot.should_stop.store(true, Ordering::SeqCst);
@@ -2446,7 +2679,6 @@ async fn zoom_start_bot(
         }
     }
     
-    // ===== TASK PARA MONITORAR STDOUT =====
     let should_stop_stdout = should_stop_arc.clone();
     let connected_stdout = connected_arc.clone();
     let handle_stdout = handle.clone();
@@ -2471,7 +2703,6 @@ async fn zoom_start_bot(
         println!("🔴 Task stdout finalizada");
     });
     
-    // ===== TASK PARA MONITORAR STDERR =====
     let should_stop_stderr = should_stop_arc.clone();
     let handle_stderr = handle.clone();
     let ws_clients_stderr = ws_clients_inner.clone();
@@ -2486,14 +2717,12 @@ async fn zoom_start_bot(
                 break;
             }
             
-            // Processar stderr também
             process_zoom_output(&line, &zoom_bot_stderr, &handle_stderr, &ws_clients_stderr, "stderr").await;
         }
         
         println!("🔴 Task stderr finalizada");
     });
     
-    // ===== TASK PARA MONITORAR O PROCESSO =====
     let process_arc_clone = process_arc.clone();
     let should_stop_clone = should_stop_arc.clone();
     let connected_clone = connected_arc.clone();
@@ -2511,7 +2740,6 @@ async fn zoom_start_bot(
         }
     });
     
-    // 🔥 AGUARDAR ATÉ O BOT ESTAR CONECTADO (COM TIMEOUT)
     println!("⏳ Aguardando bot conectar (máximo 60 segundos)...");
     let mut attempts = 0;
     let max_attempts = 60;
@@ -2520,23 +2748,19 @@ async fn zoom_start_bot(
         sleep(Duration::from_secs(1)).await;
         attempts += 1;
         
-        // Verificar se o bot já está conectado
         if zoom_bot.connected.load(Ordering::SeqCst) {
             println!("✅ Bot conectado com sucesso após {} segundos!", attempts);
             break;
         }
         
-        // Verificar se houve erro
         if let Some(err) = zoom_bot.error.lock().await.clone() {
             return Err(format!("Erro no bot: {}", err));
         }
         
-        // Verificar se o bot foi parado
         if zoom_bot.should_stop.load(Ordering::SeqCst) {
             return Err("Bot foi interrompido".to_string());
         }
         
-        // Mostrar progresso a cada 5 segundos
         if attempts % 5 == 0 {
             println!("⏳ Aguardando conexão... ({}/{} segundos)", attempts, max_attempts);
         }
@@ -2557,10 +2781,8 @@ async fn zoom_stop_bot(
 ) -> Result<(), String> {
     println!("🔴 Parando Zoom Bot...");
     
-    // 1. Sinalizar para parar
     zoom_bot.should_stop.store(true, Ordering::SeqCst);
     
-    // 2. Tentar matar o processo principal (se tiver)
     {
         let mut process = zoom_bot.process.lock().await;
         if let Some(mut child) = process.take() {
@@ -2569,18 +2791,12 @@ async fn zoom_stop_bot(
         }
     }
     
-    // 3. 🔥 FORÇAR FECHAMENTO DO zoom_bot.exe PELO NOME
     println!("🔴 Forçando fechamento do zoom_bot.exe...");
     
-    // Usando taskkill para matar o processo pelo nome exato
     let _ = std::process::Command::new("taskkill")
         .args(&["/F", "/IM", "zoom_bot.exe"])
         .spawn();
     
-    // Também tenta matar pelo PID se tiver (opcional, mas vamos manter só o nome)
-    // O taskkill /F /IM já é suficiente
-    
-    // 4. Limpar estado
     zoom_bot.connected.store(false, Ordering::SeqCst);
     *zoom_bot.raised_hands.lock().await = Vec::new();
     *zoom_bot.error.lock().await = None;
@@ -2607,6 +2823,31 @@ async fn zoom_get_state(
     Ok(state.to_string())
 }
 
+#[tauri::command]
+async fn set_video_playback(
+    paused: bool,
+    app_handle: tauri::AppHandle,
+    ws_clients: tauri::State<'_, Arc<WsClients>>,  // 🔥 ADICIONAR ws_clients
+) -> Result<(), String> {
+    // Atualizar estado global
+    let video_state = app_handle.state::<Arc<VideoPlaybackState>>();
+    video_state.paused.store(paused, Ordering::SeqCst);
+    
+    // Emitir evento para o DisplayPage (via Tauri)
+    app_handle.emit("video-playback-control", &serde_json::json!({
+        "paused": paused
+    })).map_err(|e| e.to_string())?;
+    
+    // 🔥 BROADCAST via WebSocket para todos os clientes (Control, Tablet, etc)
+    let ws_msg = serde_json::json!({
+        "type": "video_playback_control",
+        "paused": paused
+    }).to_string();
+    ws_clients.broadcast(ws_msg);
+    
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -2624,15 +2865,17 @@ pub fn run() {
             state.countdown.running = false;
             state.countdown.stopped_manually = false; 
             
-            let shared_state: SharedState = Arc::new(RwLock::new(state)); // PRIMEIRO
-            let clients = Arc::new(WsClients::new()); // PRIMEIRO
-            let upload_sessions = Arc::new(UploadSessions::new()); // PRIMEIRO
+            let shared_state: SharedState = Arc::new(RwLock::new(state));
+            let clients = Arc::new(WsClients::new());
+            let upload_sessions = Arc::new(UploadSessions::new());
             let zoom_bot = Arc::new(ZoomBotProcess::new());
+            let video_playback = Arc::new(VideoPlaybackState::new());
 
             app.manage(zoom_bot.clone()); 
             app.manage(shared_state.clone());
             app.manage(clients.clone());
             app.manage(upload_sessions.clone());
+            app.manage(video_playback);
             
             start_ws_server(shared_state.clone(), app.handle().clone(), clients.clone());
             start_http_control_server(shared_state.clone(), app.handle().clone());
@@ -2640,12 +2883,10 @@ pub fn run() {
             
             check_and_start_countdown(&shared_state, &app.handle());
             
-            // ✅ Fechar completamente ao clicar no X
             let window = app.get_webview_window("main").unwrap();
             let app_handle = app.handle().clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    // Fecha todas as janelas e encerra o app
                     if let Some(display) = app_handle.get_webview_window("display") {
                         display.close().ok();
                     }
@@ -2653,17 +2894,12 @@ pub fn run() {
                 }
             });
             
-            // ✅ INICIAR NO JW LIBRARY - Emite apenas o evento de switch
-            // O AdminPage vai escutar e atualizar o estado visual
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Aguardar um pouco para o frontend carregar
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 
-                // Emitir evento para o frontend saber que está no JW
                 let _ = handle.emit("switch-app", "jw");
                 
-                // Também ativar o JW Library via PowerShell
                 std::process::Command::new("powershell")
                     .args(&["-NoProfile", "-WindowStyle", "Hidden", "-Command", 
                         "$wshell = New-Object -ComObject WScript.Shell;",
@@ -2671,7 +2907,6 @@ pub fn run() {
                     ])
                     .spawn().ok();
                 
-                // Esconder a janela display se já existir
                 if let Some(w) = handle.get_webview_window("display") {
                     w.set_always_on_top(false).ok();
                     w.hide().ok();
@@ -2694,7 +2929,8 @@ pub fn run() {
             upload_images_to_presentation, delete_slide_from_presentation, get_presentations,
             extract_jw_playlist, reorder_slides, get_schedule_config, save_schedule_config, 
             get_countdown_state, stop_countdown, ensure_display_window, generate_upload_qr,
-            zoom_get_config, zoom_save_config, zoom_start_bot, zoom_stop_bot, zoom_get_state
+            zoom_get_config, zoom_save_config, zoom_start_bot, zoom_stop_bot, zoom_get_state,
+            set_video_playback,
         ])
         .run(tauri::generate_context!())
         .expect("erro");

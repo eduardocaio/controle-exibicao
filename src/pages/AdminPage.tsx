@@ -5,7 +5,7 @@ import {
   Upload, Monitor, BookOpen, Trash2, Play, Square, Image, 
   GlassWater, AlertTriangle, X, MessageSquare, Send, CheckCircle,
   FolderPlus, Folder, Eye, EyeOff, ChevronRight, Plus, Ban, FileArchive,
-  QrCode, Video, VideoOff, Users, UserPlus
+  QrCode, Video, VideoOff, Users, UserPlus, Pause
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import SettingsPage from './SettingsPage';
@@ -46,9 +46,37 @@ function AdminPage() {
   const [zoomHands, setZoomHands] = useState<{ name: string; timestamp: number }[]>([]);
   const [zoomError, setZoomError] = useState<string | null>(null);
   const [zoomLoading, setZoomLoading] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(false);
+
+  const getCurrentSlide = () => {
+    if (activeImageIndex !== null && presentations.length > 0) {
+      const activePres = presentations.find(p => p.id === activePresentationId);
+      if (activePres && activePres.slides[activeImageIndex]) {
+        return activePres.slides[activeImageIndex];
+      }
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    const unlisten = listen('video-playback-control', (event: any) => {
+      console.log('🎬 Admin recebeu video-playback-control:', event.payload);
+      setVideoPaused(event.payload.paused);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  const currentSlide = getCurrentSlide();
+  const isVideoActive = currentSlide?.is_video === true;
 
   useEffect(() => { (async () => { try { setMonitors(await invoke('get_monitors') as string[]); } catch (_) {} })(); }, []);
   useEffect(() => { loadPresentations(); checkDisplayState(); }, []);
+
+  const handleToggleVideoPlayback = async () => {
+    const newState = !videoPaused;
+    setVideoPaused(newState);
+    await invoke('set_video_playback', { paused: newState });
+  };
 
   useEffect(() => {
     const interval = setInterval(checkDisplayState, 500);
@@ -137,7 +165,15 @@ function AdminPage() {
 
   const loadThumb = async (filename: string) => {
     if (thumbCache[filename]) return thumbCache[filename];
-    const url = `http://localhost:20778/thumbnails/${filename}`;
+    
+    const isVideo = /\.(mp4|webm|mov|avi|mkv|m4v|ogv|wmv|flv|3gp)$/i.test(filename);
+    
+    let thumbFilename = filename;
+    if (isVideo) {
+      thumbFilename = filename.replace(/\.[^.]+$/, '.jpg');
+    }
+    
+    const url = `http://localhost:20778/thumbnails/${thumbFilename}`;
     setThumbCache(prev => ({ ...prev, [filename]: url }));
     return url;
   };
@@ -192,7 +228,10 @@ function AdminPage() {
   const handleUploadToPresentation = async (presentationId: string) => {
     const f = await open({ 
       multiple: true, 
-      filters: [{ name: 'Imagens', extensions: ['jpg','jpeg','png','webp','gif','bmp'] }] 
+      filters: [
+        { name: 'Imagens', extensions: ['jpg','jpeg','png','webp','gif','bmp'] },
+        { name: 'Vídeos', extensions: ['mp4','webm','mov','avi','mkv','m4v'] }
+      ] 
     });
     if (!f) return;
     const paths = (Array.isArray(f) ? f : [f]).map(x => typeof x === 'string' ? x : (x as any).path);
@@ -233,12 +272,14 @@ function AdminPage() {
     setActiveImageIndex(idx);
     setIsBlackout(false);
     setActiveApp('sistema');
+    setVideoPaused(false);
   };
 
   const handleHideImage = async () => {
     await invoke('set_blackout', { value: true });
     setActiveImageIndex(null);
     setIsBlackout(true);
+    setVideoPaused(false);
     
     try {
       const countdownState = JSON.parse(await invoke('get_countdown_state') as string);
@@ -334,7 +375,6 @@ function AdminPage() {
     }
   }, [showSettings]);
 
-  // Eventos do Zoom
   useEffect(() => {
     const unlistenConnected = listen('zoom-connected', () => {
       setZoomConnected(true);
@@ -478,7 +518,33 @@ function AdminPage() {
           </div>
           
           <div style={{ display:'flex', alignItems:'center', gap:'1rem', flexWrap:'wrap' }}>
-            {/* Timer maior e mais destacado */}
+            {/* Botão de controle de vídeo quando ativo */}
+            {isVideoActive && !isBlackout && (
+              <button
+                onClick={handleToggleVideoPlayback}
+                style={{
+                  padding: '0.5rem 1rem',
+                  background: videoPaused ? 'rgba(52,211,153,0.15)' : 'rgba(245,158,11,0.15)',
+                  color: videoPaused ? '#34d399' : '#fbbf24',
+                  border: `1px solid ${videoPaused ? 'rgba(52,211,153,0.3)' : 'rgba(245,158,11,0.3)'}`,
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                }}
+              >
+                {videoPaused ? (
+                  <><Play size={14} /> Reproduzir</>
+                ) : (
+                  <><Pause size={14} /> Pausar</>
+                )}
+              </button>
+            )}
+
+            {/* Timer */}
             <div style={{
               background: 'linear-gradient(135deg, rgba(102,126,234,0.08) 0%, rgba(102,126,234,0.03) 100%)',
               borderRadius: '12px',
@@ -488,7 +554,7 @@ function AdminPage() {
               <Timer onControl={handleTimerControl} isOperator={true} size="large" />
             </div>
             
-            {/* Contagem regressiva */}
+            {/* Countdown */}
             <div style={{
               background: 'rgba(245,158,11,0.05)',
               borderRadius: '12px',
@@ -623,7 +689,7 @@ function AdminPage() {
                 </div>
             </div>
             
-            {/* Opções de Resposta (até 4) */}
+            {/* Opções de Resposta */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingLeft: '3.25rem' }}>
                 <div style={{ fontSize: '0.72rem', color: '#6b7280', fontWeight: 500 }}>
                     Opções de resposta (opcional - até 4):
@@ -833,7 +899,7 @@ function AdminPage() {
           </div>
         )}
 
-        {/* Painel do Zoom Bot - versão corrigida (sem botão de teste) */}
+        {/* Zoom Bot */}
         <div style={{
           background: 'linear-gradient(135deg, #111820 0%, #1a1f2e 100%)',
           borderRadius: '16px',
@@ -870,7 +936,6 @@ function AdminPage() {
                     {zoomError}
                   </p>
                 )}
-                {/* Mostrar configuração atual */}
                 <p style={{ margin: '2px 0 0', fontSize: '0.65rem', color: '#484f58' }}>
                   ID: {zoomConfig.meeting_id || 'Não configurado'} | Bot: {zoomConfig.bot_name}
                 </p>
@@ -878,7 +943,6 @@ function AdminPage() {
             </div>
 
             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              {/* Mãos levantadas - contador visual */}
               {zoomConnected && zoomHands.length > 0 && (
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: '0.4rem',
@@ -992,7 +1056,6 @@ function AdminPage() {
             </div>
           </div>
 
-          {/* Lista de mãos levantadas - estilo visual agradável */}
           {zoomConnected && zoomHands.length > 0 && (
             <div style={{
               marginTop: '0.75rem',
@@ -1031,7 +1094,6 @@ function AdminPage() {
             </div>
           )}
 
-          {/* Configuração resumida */}
           {!zoomConnected && !zoomError && (
             <div style={{
               marginTop: '0.5rem',
@@ -1263,6 +1325,10 @@ function AdminPage() {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
         }
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
       `}</style>
       {showQrModal && (
         <div style={{position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000}} onClick={()=>setShowQrModal(false)}>
@@ -1278,13 +1344,19 @@ function AdminPage() {
   );
 }
 
-// Componente para cada apresentação
+// Componente PresentationCard
 function PresentationCard({ 
   presentation, isExpanded, isActive, onToggleExpand, onDelete, onUpload, 
   onDeleteSlide, onSetActive, onShowImage, onHideImage, activeImageIndex, 
   isBlackout, thumbCache, loadThumb, hoveredId, setHoveredId, 
-  isCurrentActivePresentation 
+  isCurrentActivePresentation
 }: any) {
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
   return (
     <div style={{ 
       background:'#111820', borderRadius:'16px', 
@@ -1292,7 +1364,6 @@ function PresentationCard({
       overflow:'hidden',
       boxShadow: isActive ? '0 0 20px rgba(52,211,153,0.1)' : 'none'
     }}>
-      {/* Cabeçalho da Apresentação */}
       <div style={{ 
         padding:'1rem 1.25rem', display:'flex', justifyContent:'space-between', 
         alignItems:'center', gap:'0.75rem',
@@ -1399,7 +1470,6 @@ function PresentationCard({
         </div>
       </div>
       
-      {/* Slides da Apresentação (expandido) */}
       {isExpanded && (
         <div style={{ 
           padding:'0 1.25rem 1.25rem',
@@ -1433,6 +1503,7 @@ function PresentationCard({
                   isHovered={hoveredId === slide.id}
                   onHover={setHoveredId}
                   canShow={isActive}
+                  formatDuration={formatDuration}
                 />
               ))}
             </div>
@@ -1444,17 +1515,24 @@ function PresentationCard({
 }
 
 // Componente ThumbCard
-function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, isActive, isHovered, onHover, canShow }: any) {
+function ThumbCard({ 
+  img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
+  isActive, isHovered, onHover, canShow, formatDuration
+}: any) {
   const [src, setSrc] = useState('');
+  
+  const isVideo = img.filename && /\.(mp4|webm|mov|avi|mkv|m4v|ogv|wmv|flv|3gp)$/i.test(img.filename);
 
   useEffect(() => {
     const key = img.filename;
     if (thumbCache[key]) {
       setSrc(thumbCache[key]);
     } else {
-      loadThumb(key).then((s: string) => { if (s) setSrc(s); });
+      loadThumb(key).then((s: string) => { 
+        if (s) setSrc(s); 
+      });
     }
-  }, [img.filename, thumbCache]);
+  }, [img.filename, thumbCache, loadThumb]);
 
   return (
     <div 
@@ -1464,18 +1542,105 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
         background: isActive ? '#141010' : '#0f1419', 
         borderRadius:'10px', 
         overflow:'hidden', 
-        border: isActive ? '1px solid rgba(239,68,68,0.25)' : '1px solid rgba(255,255,255,0.04)',
-        boxShadow: isActive ? '0 0 20px rgba(239,68,68,0.08)' : 'none',
+        border: isActive ? '2px solid rgba(239,68,68,0.3)' : '1px solid rgba(255,255,255,0.04)',
+        boxShadow: isActive ? '0 0 20px rgba(239,68,68,0.15)' : 'none',
         transition:'all 0.2s ease',
-        opacity: canShow ? 1 : 0.85
+        opacity: canShow ? 1 : 0.7,
+        position: 'relative',
       }}>
       <div style={{ 
         height:'130px', 
-        background:'#080c10', 
-        display:'flex', alignItems:'center', justifyContent:'center', 
-        overflow:'hidden', position:'relative'
+        background: isVideo ? '#0a0a1a' : '#080c10', 
+        display:'flex', 
+        alignItems:'center', 
+        justifyContent:'center', 
+        overflow:'hidden', 
+        position:'relative'
       }}>
-        {src ? (
+        {isVideo ? (
+          <div style={{ 
+            width: '100%', 
+            height: '100%', 
+            display: 'flex', 
+            flexDirection: 'column',
+            alignItems: 'center', 
+            justifyContent: 'center',
+            background: 'linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 100%)',
+            position: 'relative',
+          }}>
+            <div style={{
+              position: 'absolute',
+              top: 0, left: 0, right: 0, bottom: 0,
+              opacity: 0.05,
+              background: `radial-gradient(circle at 30% 40%, #667eea 0%, transparent 60%),
+                          radial-gradient(circle at 70% 60%, #764ba2 0%, transparent 60%)`
+            }} />
+            
+            {src ? (
+              <img 
+                src={src} 
+                alt={`Vídeo ${idx+1}`} 
+                style={{ 
+                  width:'100%', 
+                  height:'100%', 
+                  objectFit:'cover', 
+                  filter: isActive ? 'brightness(1.05)' : 'brightness(0.85)'
+                }} 
+              />
+            ) : (
+              <>
+                <div style={{
+                  width: '56px',
+                  height: '56px',
+                  borderRadius: '50%',
+                  background: 'rgba(102,126,234,0.15)',
+                  border: '2px solid rgba(102,126,234,0.3)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  position: 'relative',
+                  zIndex: 1,
+                  boxShadow: '0 0 30px rgba(102,126,234,0.1)',
+                }}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#667eea" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                  </svg>
+                </div>
+                
+                <span style={{ 
+                  fontSize: '0.55rem', 
+                  color: '#667eea', 
+                  marginTop: '0.6rem',
+                  fontWeight: 700,
+                  letterSpacing: '2px',
+                  textTransform: 'uppercase',
+                  opacity: 0.8,
+                  position: 'relative',
+                  zIndex: 1,
+                }}>
+                  Vídeo
+                </span>
+              </>
+            )}
+            
+            {img.duration && (
+              <div style={{
+                position: 'absolute',
+                bottom: '6px',
+                right: '6px',
+                padding: '0.1rem 0.4rem',
+                background: 'rgba(0,0,0,0.7)',
+                borderRadius: '4px',
+                fontSize: '0.6rem',
+                color: '#fff',
+                fontFamily: 'monospace',
+                backdropFilter: 'blur(4px)',
+              }}>
+                {formatDuration(img.duration)}
+              </div>
+            )}
+          </div>
+        ) : src ? (
           <img 
             src={src} 
             alt={`Imagem ${idx+1}`} 
@@ -1483,24 +1648,60 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
               width:'100%', 
               height:'100%', 
               objectFit:'cover', 
-              filter: isActive ? 'brightness(1.05)' : canShow ? 'brightness(0.85)' : 'brightness(0.7)'
+              filter: isActive ? 'brightness(1.05)' : canShow ? 'brightness(0.85)' : 'brightness(0.6)'
             }} 
           />
         ) : (
           <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:'0.3rem' }}>
-            <div style={{ width:'32px', height:'32px', borderRadius:'8px', background:'rgba(255,255,255,0.03)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+            <div style={{ 
+              width:'32px', 
+              height:'32px', 
+              borderRadius:'8px', 
+              background:'rgba(255,255,255,0.03)', 
+              display:'flex', 
+              alignItems:'center', 
+              justifyContent:'center' 
+            }}>
               <Image size={16} color="rgba(255,255,255,0.15)" />
             </div>
-            <span style={{ fontSize:'0.7rem', color:'#484f58' }}>Imagem {idx+1}</span>
+            <span style={{ fontSize:'0.65rem', color:'#484f58' }}>
+              {isVideo ? 'Vídeo' : `Imagem ${idx+1}`}
+            </span>
           </div>
         )}
         
-        {/* Hover com botão Exibir habilitado (apresentação ativa) */}
+        {isVideo && (
+          <div style={{
+            position: 'absolute',
+            top: '6px',
+            right: '6px',
+            padding: '0.15rem 0.4rem',
+            background: 'rgba(102,126,234,0.2)',
+            borderRadius: '4px',
+            border: '1px solid rgba(102,126,234,0.2)',
+            fontSize: '0.5rem',
+            color: '#667eea',
+            fontWeight: 700,
+            letterSpacing: '0.5px',
+            backdropFilter: 'blur(4px)',
+          }}>
+            ▶
+          </div>
+        )}
+        
         {isHovered && !isActive && canShow && (
           <div style={{
-            position:'absolute', top:0, left:0, right:0, bottom:0,
-            background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center',
-            transition:'all 0.15s'
+            position:'absolute', 
+            top:0, 
+            left:0, 
+            right:0, 
+            bottom:0,
+            background:'rgba(0,0,0,0.75)', 
+            display:'flex', 
+            alignItems:'center', 
+            justifyContent:'center',
+            transition:'all 0.15s',
+            backdropFilter: 'blur(2px)',
           }}>
             <button 
               onClick={(e) => {
@@ -1509,7 +1710,7 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
               }}
               style={{
                 padding:'0.5rem 0.8rem', 
-                background:'#667eea', 
+                background: isVideo ? '#667eea' : '#667eea', 
                 color:'#fff',
                 border:'none', 
                 borderRadius:'6px', 
@@ -1519,27 +1720,39 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
                 display:'flex', 
                 alignItems:'center', 
                 gap:'0.3rem',
-                transition:'all 0.15s'
+                transition:'all 0.15s',
+                boxShadow: '0 4px 15px rgba(102,126,234,0.3)',
               }}
               onMouseEnter={e => e.currentTarget.style.background = '#5a6fd6'}
               onMouseLeave={e => e.currentTarget.style.background = '#667eea'}
             >
-              <Play size={13} /> Exibir
+              {isVideo ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+              ) : (
+                <Play size={13} />
+              )}
+              {isVideo ? 'Reproduzir' : 'Exibir'}
             </button>
           </div>
         )}
 
-        {/* Hover com botão Exibir desabilitado (apresentação inativa) */}
         {isHovered && !isActive && !canShow && (
           <div style={{
-            position:'absolute', top:0, left:0, right:0, bottom:0,
-            background:'rgba(0,0,0,0.75)', 
+            position:'absolute', 
+            top:0, 
+            left:0, 
+            right:0, 
+            bottom:0,
+            background:'rgba(0,0,0,0.8)', 
             display:'flex', 
             flexDirection:'column', 
             alignItems:'center', 
             justifyContent:'center',
             transition:'all 0.15s', 
-            gap:'0.6rem'
+            gap:'0.6rem',
+            backdropFilter: 'blur(2px)',
           }}>
             <div style={{
               width:'36px', 
@@ -1584,17 +1797,30 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
           </div>
         )}
 
-        {/* Imagem ativa (sendo exibida) */}
         {isActive && (
           <div style={{
-            position:'absolute', top:0, left:0, right:0, bottom:0,
-            background:'rgba(15,8,8,0.85)', backdropFilter:'blur(2px)',
-            display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:'0.4rem'
+            position:'absolute', 
+            top:0, 
+            left:0, 
+            right:0, 
+            bottom:0,
+            background:'rgba(15,8,8,0.88)', 
+            backdropFilter:'blur(2px)',
+            display:'flex', 
+            flexDirection:'column', 
+            alignItems:'center', 
+            justifyContent:'center', 
+            gap:'0.4rem'
           }}>
             <div style={{
-              width:'32px', height:'32px', borderRadius:'50%',
-              background:'rgba(239,68,68,0.12)', border:'1.5px solid rgba(239,68,68,0.4)',
-              display:'flex', alignItems:'center', justifyContent:'center'
+              width:'32px', 
+              height:'32px', 
+              borderRadius:'50%',
+              background:'rgba(239,68,68,0.12)', 
+              border:'1.5px solid rgba(239,68,68,0.4)',
+              display:'flex', 
+              alignItems:'center', 
+              justifyContent:'center'
             }}>
               <div style={{ width:'10px', height:'10px', borderRadius:'2px', background:'rgba(239,68,68,0.8)' }} />
             </div>
@@ -1625,7 +1851,9 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
       
       <div style={{ 
         padding:'0.4rem 0.6rem', 
-        display:'flex', justifyContent:'space-between', alignItems:'center',
+        display:'flex', 
+        justifyContent:'space-between', 
+        alignItems:'center',
         borderTop:'1px solid rgba(255,255,255,0.03)',
         background: isActive ? 'rgba(239,68,68,0.04)' : 'transparent'
       }}>
@@ -1635,11 +1863,23 @@ function ThumbCard({ img, idx, loadThumb, thumbCache, onDelete, onShow, onHide, 
             fontWeight:600, 
             color: isActive ? 'rgba(239,68,68,0.85)' : '#8b949e' 
           }}>
-            Imagem {idx+1}
+            {isVideo ? '🎬' : '🖼️'} {idx+1}
           </span>
+          {isVideo && (
+            <span style={{
+              fontSize:'0.5rem',
+              padding:'0.1rem 0.3rem',
+              borderRadius:'3px',
+              background:'rgba(102,126,234,0.12)',
+              color:'#667eea',
+              fontWeight:600,
+            }}>
+              MP4
+            </span>
+          )}
           {!canShow && (
             <span style={{
-              fontSize:'0.6rem',
+              fontSize:'0.5rem',
               padding:'0.1rem 0.3rem',
               borderRadius:'3px',
               background:'rgba(245,158,11,0.15)',

@@ -1,14 +1,16 @@
-// src/pages/DisplayPage.tsx
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 function DisplayPage() {
   const [imageSrc, setImageSrc] = useState<string>('');
+  const [videoSrc, setVideoSrc] = useState<string>('');
+  const [mediaType, setMediaType] = useState<'image' | 'video' | null>(null);
   const [defaultImage, setDefaultImage] = useState<string>('');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   
-  // Estados do cronômetro - apenas exibição, sem contagem local
   const [countdownRunning, setCountdownRunning] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const [countdownTarget, setCountdownTarget] = useState('');
@@ -19,15 +21,33 @@ function DisplayPage() {
   }, []);
 
   useEffect(() => {
-      const unlisten = listen('countdown-force-display', (event: any) => {
-          // Forçar exibição da tela de contagem
-          setCountdownRunning(true);
-          setCountdownTarget(event.payload);
-      });
-      
-      return () => {
-          unlisten.then(fn => fn());
-      };
+    const unlisten = listen('countdown-force-display', (event: any) => {
+      setCountdownRunning(true);
+      setCountdownTarget(event.payload);
+    });
+    
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, []);
+
+  // Escutar comando de pausa/play do vídeo
+  useEffect(() => {
+    const unlisten = listen('video-playback-control', (event: any) => {
+      const { paused } = event.payload;
+      setIsPaused(paused);
+      if (videoRef.current) {
+        if (paused) {
+          videoRef.current.pause();
+        } else {
+          videoRef.current.play().catch(() => {});
+        }
+      }
+    });
+    
+    return () => {
+      unlisten.then(fn => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -41,9 +61,31 @@ function DisplayPage() {
       try {
         const s = JSON.parse(await invoke('get_display_state') as string);
         if (!s.is_blackout && s.current_filename) {
-          setImageSrc(await invoke('get_image_base64', { filename: s.current_filename, isThumb: false }) as string);
+          const filename = s.current_filename;
+          const isVideo = /\.(mp4|webm|mov|avi|mkv|m4v|ogv|wmv|flv|3gp)$/i.test(filename);
+          
+          if (isVideo) {
+            const ip = window.location.hostname;
+            const videoUrl = `http://${ip}:20778/videos/${filename}`;
+            setVideoSrc(videoUrl);
+            setMediaType('video');
+            setImageSrc('');
+            // Reset pause state when video changes
+            setIsPaused(false);
+          } else {
+            const imgBase64 = await invoke('get_image_base64', { filename, isThumb: false }) as string;
+            setImageSrc(imgBase64);
+            setMediaType('image');
+            setVideoSrc('');
+          }
         } else { 
-          setImageSrc(''); 
+          setImageSrc('');
+          setVideoSrc('');
+          setMediaType(null);
+          setIsPaused(false);
+          if (videoRef.current) {
+            videoRef.current.pause();
+          }
         }
       } catch (_) {}
     };
@@ -52,7 +94,28 @@ function DisplayPage() {
     return () => clearInterval(i);
   }, [refreshKey]);
 
-  // Monitorar estado do cronômetro via backend (sem contagem local)
+  useEffect(() => {
+    if (mediaType === 'video' && videoRef.current && videoSrc) {
+      videoRef.current.load();
+      videoRef.current.play().catch(e => {
+        console.log('Auto-play com áudio bloqueado:', e);
+        const playVideo = () => {
+          videoRef.current?.play().catch(() => {});
+          document.removeEventListener('click', playVideo);
+          document.removeEventListener('keydown', playVideo);
+        };
+        document.addEventListener('click', playVideo);
+        document.addEventListener('keydown', playVideo);
+      });
+    }
+  }, [videoSrc, mediaType]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = 1.0;
+    }
+  }, [videoSrc]);
+
   useEffect(() => {
     const checkCountdown = async () => {
       try {
@@ -64,11 +127,10 @@ function DisplayPage() {
     };
 
     checkCountdown();
-    const interval = setInterval(checkCountdown, 500); // Atualiza a cada 500ms
+    const interval = setInterval(checkCountdown, 500);
     return () => clearInterval(interval);
   }, []);
 
-  // Escutar eventos do cronômetro em tempo real
   useEffect(() => {
     const unlistenUpdate = listen('countdown-update', (event: any) => {
       setCountdownRunning(event.payload.running);
@@ -108,8 +170,52 @@ function DisplayPage() {
       position: 'relative',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
     }}>
-      {/* Prioridade 1: Imagem ativa (transmissão) */}
-      {imageSrc ? (
+      {/* Prioridade 1: Vídeo COM ÁUDIO */}
+      {mediaType === 'video' && videoSrc ? (
+        <>
+          <video 
+            ref={videoRef}
+            src={videoSrc}
+            autoPlay
+            loop
+            playsInline
+            style={{ 
+              width: '100%', 
+              height: '100%', 
+              objectFit: 'contain',
+              backgroundColor: '#000000'
+            }} 
+          />
+          {/* Indicador de pausa */}
+          {isPaused && (
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              pointerEvents: 'none',
+              zIndex: 10,
+            }}>
+              <div style={{
+                width: '80px',
+                height: '80px',
+                borderRadius: '50%',
+                background: 'rgba(0,0,0,0.6)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                border: '2px solid rgba(255,255,255,0.3)',
+                backdropFilter: 'blur(4px)',
+              }}>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="white">
+                  <rect x="6" y="3" width="4" height="18" rx="1" />
+                  <rect x="14" y="3" width="4" height="18" rx="1" />
+                </svg>
+              </div>
+            </div>
+          )}
+        </>
+      ) : mediaType === 'image' && imageSrc ? (
         <img 
           src={imageSrc} 
           alt="" 
@@ -122,7 +228,6 @@ function DisplayPage() {
           }} 
         />
       ) : countdownRunning && countdownSeconds > 0 ? (
-        /* Prioridade 2: Cronômetro regressivo em tela cheia */
         <div style={{
           width: '100%',
           height: '100%',
@@ -134,7 +239,6 @@ function DisplayPage() {
           position: 'relative',
           overflow: 'hidden'
         }}>
-          {/* Partículas de fundo decorativas */}
           <div style={{
             position: 'absolute',
             top: 0, left: 0, right: 0, bottom: 0,
@@ -144,7 +248,6 @@ function DisplayPage() {
                         radial-gradient(circle at 50% 80%, #4a90d9 0%, transparent 50%)`
           }} />
 
-          {/* Linhas decorativas sutis */}
           <div style={{
             position: 'absolute',
             top: '15%', left: '5%', right: '5%',
@@ -158,7 +261,6 @@ function DisplayPage() {
             background: 'linear-gradient(90deg, transparent, rgba(74,144,217,0.1), transparent)'
           }} />
 
-          {/* Conteúdo do cronômetro */}
           <div style={{
             position: 'relative',
             zIndex: 1,
@@ -168,7 +270,6 @@ function DisplayPage() {
             gap: 'clamp(1.5rem, 4vh, 3rem)'
           }}>
       
-            {/* 🔥 Título - MAIOR E MAIS CLARO */}
             <div style={{
               fontSize: 'clamp(3rem, 3.5vw, 4.5rem)',
               color: 'rgba(255,255,255,0.85)',
@@ -181,7 +282,6 @@ function DisplayPage() {
               A reunião começará em
             </div>
 
-            {/* 🔥 Timer - MAIOR E MAIS GROSSO */}
             <div style={{
               fontSize: 'clamp(10rem, 22vw, 20rem)',
               fontWeight: 800,
@@ -195,7 +295,6 @@ function DisplayPage() {
               {formatTime(countdownSeconds)}
             </div>
 
-            {/* 🔥 Target time - MAIOR E MAIS CLARO */}
             {countdownTarget && (
               <div style={{
                 fontSize: 'clamp(2rem, 2.5vw, 3.5rem)',
@@ -221,7 +320,6 @@ function DisplayPage() {
           </div>
         </div>
       ) : defaultImage ? (
-        /* Prioridade 3: Imagem padrão (Texto do Ano) */
         <img 
           src={defaultImage} 
           alt="Texto do Ano" 
@@ -234,7 +332,6 @@ function DisplayPage() {
           }} 
         />
       ) : (
-        /* Prioridade 4: Tela preta */
         <div style={{ width:'100%', height:'100%', backgroundColor:'#000000' }} />
       )}
     </div>

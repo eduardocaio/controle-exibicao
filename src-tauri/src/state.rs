@@ -5,6 +5,8 @@ pub struct Slide {
     pub id: String,
     pub filename: String,
     pub order: usize,
+    pub is_video: bool,
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X } from 'lucide-react';
+import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X, Pause, Play } from 'lucide-react';
 
 function ControlPage() {
   const [slides, setSlides] = useState<any[]>([]);
@@ -14,12 +14,20 @@ function ControlPage() {
   const [operatorMessage, setOperatorMessage] = useState<any>(null);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [activePresentationId, setActivePresentationId] = useState<string | null>(null);
+  const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
+  const [videoPaused, setVideoPaused] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   
-  // ===== Sistema de notificações =====
   const [notifications, setNotifications] = useState<{ id: string; name: string; timestamp: number }[]>([]);
   const notificationIdCounter = useRef(0);
   const notificationsRef = useRef<HTMLDivElement>(null);
+
+  const formatDuration = (seconds: number) => {
+    if (!seconds || seconds < 0) return '00:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
 
   useEffect(() => {
     const handleResize = () => {
@@ -33,7 +41,6 @@ function ControlPage() {
     };
   }, []);
 
-  // Timer local para contagem contínua
   useEffect(() => {
     let interval: any = null;
     
@@ -50,9 +57,68 @@ function ControlPage() {
 
   const getServerIp = () => window.location.hostname;
 
-  const getThumbnailUrl = (filename: string) => {
+  const getThumbnailUrl = (slide: any) => {
     const ip = getServerIp();
-    return `http://${ip}:20778/thumbnails/${filename}`;
+    const baseUrl = `http://${ip}:20778/thumbnails/`;
+    
+    if (slide.is_video === true) {
+      const filenameWithoutExt = slide.filename.replace(/\.[^.]+$/, '');
+      return `${baseUrl}${filenameWithoutExt}.jpg`;
+    }
+    
+    return `${baseUrl}${slide.filename}`;
+  };
+
+  const loadThumbnail = (slide: any) => {
+    const filename = slide.filename;
+    const url = getThumbnailUrl(slide);
+    
+    const img = new Image();
+    img.onload = () => {
+      setThumbnailUrls(prev => ({
+        ...prev,
+        [filename]: url
+      }));
+      setImageErrors(prev => ({
+        ...prev,
+        [filename]: false
+      }));
+    };
+    img.onerror = () => {
+      if (slide.is_video) {
+        const fallbackUrl = `http://${getServerIp()}:20778/thumbnails/${slide.filename}`;
+        const fallbackImg = new Image();
+        fallbackImg.onload = () => {
+          setThumbnailUrls(prev => ({
+            ...prev,
+            [filename]: fallbackUrl
+          }));
+          setImageErrors(prev => ({
+            ...prev,
+            [filename]: false
+          }));
+        };
+        fallbackImg.onerror = () => {
+          setImageErrors(prev => ({
+            ...prev,
+            [filename]: true
+          }));
+        };
+        fallbackImg.src = fallbackUrl;
+      } else {
+        setImageErrors(prev => ({
+          ...prev,
+          [filename]: true
+        }));
+      }
+    };
+    img.src = url;
+  };
+
+  const handleToggleVideoPlayback = () => {
+    const newState = !videoPaused;
+    setVideoPaused(newState);
+    sendCommand('video_playback', { paused: newState });
   };
 
   const connect = () => {
@@ -84,11 +150,9 @@ function ControlPage() {
             setIsBlackout(data.is_blackout);
             setActivePresentationId(data.active_presentation_id || null);
             
-            const urls: Record<string, string> = {};
             newSlides.forEach((slide: any) => {
-              urls[slide.filename] = getThumbnailUrl(slide.filename);
+              loadThumbnail(slide);
             });
-            setThumbnailUrls(urls);
           }
           
           if (data.type === 'timer_state') {
@@ -124,11 +188,12 @@ function ControlPage() {
             setOperatorMessage(null);
           }
 
-          // ===== EVENTOS DO ZOOM VIA WEBSOCKET =====
+          if (data.type === 'video_playback_control') {
+            setVideoPaused(data.paused);
+          }
+
           if (data.type === 'zoom_hand_raised') {
-            console.log('✋ Mão levantada via WebSocket:', data.name);
             const { name, timestamp } = data;
-            
             const id = Date.now() + '-' + (notificationIdCounter.current++);
             
             setNotifications(prev => {
@@ -139,7 +204,6 @@ function ControlPage() {
           }
           
           if (data.type === 'zoom_hand_lowered') {
-            console.log('👇 Mão abaixada via WebSocket:', data.name);
             setNotifications(prev => prev.filter(n => n.name !== data.name));
           }
           
@@ -199,10 +263,12 @@ function ControlPage() {
     if (idx === currentIndex && !isBlackout) {
       setIsBlackout(true);
       sendCommand('blackout');
+      setVideoPaused(false);
     } else {
       setCurrentIndex(idx);
       setIsBlackout(false);
       sendCommand('set_slide', { index: idx });
+      setVideoPaused(false);
     }
   };
 
@@ -265,7 +331,6 @@ function ControlPage() {
   
   const layout = getLayout();
 
-  // ===== CALCULAR TAMANHO DINÂMICO DAS NOTIFICAÇÕES =====
   const getNotificationSize = () => {
     const count = notifications.length;
     
@@ -279,7 +344,6 @@ function ControlPage() {
       timeSize: 0.5
     };
     
-    // 🔥 A partir de 4, começa a diminuir progressivamente
     if (count <= 3) {
       return { 
         fontSize: 2.0, 
@@ -335,6 +399,9 @@ function ControlPage() {
 
   const size = getNotificationSize();
 
+  const currentSlide = slides[currentIndex];
+  const isVideoActive = currentSlide?.is_video === true && !isBlackout;
+
   return (
     <div style={{ 
       height: '100vh',
@@ -352,7 +419,7 @@ function ControlPage() {
       top: 0,
       left: 0,
     }}>
-      {/* Header - Timer e Botões na mesma linha */}
+      {/* Header */}
       <div style={{ 
         display: 'flex',
         flexDirection: 'column',
@@ -404,7 +471,7 @@ function ControlPage() {
           )}
         </div>
         
-        {/* Timer + Botões na mesma linha - MAIORES */}
+        {/* 🔥 LINHA DOS BOTÕES - Timer, Vídeo, Água, Indicador */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -413,7 +480,7 @@ function ControlPage() {
           width: '100%',
           flexWrap: 'wrap',
         }}>
-          {/* Timer - MAIOR */}
+          {/* Timer */}
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -538,11 +605,83 @@ function ControlPage() {
             </div>
           </div>
 
-          {/* Botões de Água e Indicador - MAIORES */}
+          {/* 🔥 BOTÃO DE VÍDEO - MESMO TAMANHO QUE ÁGUA E INDICADOR */}
           <div style={{
             display: 'flex',
             gap: '1rem',
+            alignItems: 'center',
           }}>
+            {isVideoActive && (
+              <button
+                onClick={handleToggleVideoPlayback}
+                style={{
+                  padding: '1.1rem 2rem',
+                  background: videoPaused ? 'rgba(52,211,153,0.12)' : 'rgba(245,158,11,0.12)',
+                  color: videoPaused ? '#34d399' : '#fbbf24',
+                  border: `2px solid ${videoPaused ? 'rgba(52,211,153,0.2)' : 'rgba(245,158,11,0.2)'}`,
+                  borderRadius: '14px',
+                  cursor: 'pointer',
+                  fontSize: '1.15rem',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '0.75rem',
+                  transition: 'all 0.2s ease',
+                  WebkitTapHighlightColor: 'transparent',
+                  boxShadow: videoPaused 
+                    ? '0 4px 12px rgba(52,211,153,0.05)' 
+                    : '0 4px 12px rgba(245,158,11,0.05)',
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = videoPaused 
+                    ? 'rgba(52,211,153,0.2)' 
+                    : 'rgba(245,158,11,0.2)';
+                  e.currentTarget.style.borderColor = videoPaused 
+                    ? 'rgba(52,211,153,0.4)' 
+                    : 'rgba(245,158,11,0.4)';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = videoPaused 
+                    ? '0 8px 24px rgba(52,211,153,0.15)' 
+                    : '0 8px 24px rgba(245,158,11,0.15)';
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = videoPaused 
+                    ? 'rgba(52,211,153,0.12)' 
+                    : 'rgba(245,158,11,0.12)';
+                  e.currentTarget.style.borderColor = videoPaused 
+                    ? 'rgba(52,211,153,0.2)' 
+                    : 'rgba(245,158,11,0.2)';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = videoPaused 
+                    ? '0 4px 12px rgba(52,211,153,0.05)' 
+                    : '0 4px 12px rgba(245,158,11,0.05)';
+                }}
+              >
+                <div style={{
+                  width: '42px',
+                  height: '42px',
+                  borderRadius: '10px',
+                  background: videoPaused 
+                    ? 'rgba(52,211,153,0.15)' 
+                    : 'rgba(245,158,11,0.15)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                  {videoPaused ? (
+                    <Play size={26} color="#34d399" />
+                  ) : (
+                    <Pause size={26} color="#fbbf24" />
+                  )}
+                </div>
+                <span style={{ letterSpacing: '0.5px' }}>
+                  {videoPaused ? 'Reproduzir' : 'Pausar'}
+                </span>
+              </button>
+            )}
+
+            {/* Água */}
             <button onClick={handleRequestWater} style={{
               padding: '1.1rem 2rem',
               background: 'linear-gradient(135deg, rgba(59,130,246,0.12) 0%, rgba(59,130,246,0.06) 100%)',
@@ -587,6 +726,7 @@ function ControlPage() {
               <span style={{ letterSpacing: '0.5px' }}>Água</span>
             </button>
             
+            {/* Indicador */}
             <button onClick={handleRequestIndicator} style={{
               padding: '1.1rem 2rem',
               background: 'linear-gradient(135deg, rgba(245,158,11,0.12) 0%, rgba(245,158,11,0.06) 100%)',
@@ -646,10 +786,14 @@ function ControlPage() {
             {slides.map((slide: any, idx: number) => {
               const isActive = idx === currentIndex && !isBlackout;
               const thumbUrl = thumbnailUrls[slide.filename];
+              const hasError = imageErrors[slide.filename];
+              const isVideo = slide.is_video === true;
               
               return (
                 <div key={slide.id} onClick={() => handleImageClick(idx)} style={{ 
-                  position: 'relative', borderRadius: '10px', overflow: 'hidden',
+                  position: 'relative', 
+                  borderRadius: '10px', 
+                  overflow: 'hidden',
                   cursor: 'pointer',
                   border: isActive ? '2.5px solid #ef4444' : '1px solid rgba(255,255,255,0.06)',
                   boxShadow: isActive 
@@ -665,22 +809,93 @@ function ControlPage() {
                     flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
                     background: '#080c10', overflow: 'hidden', position: 'relative', minHeight: 0
                   }}>
-                    {thumbUrl ? (
-                      <img src={thumbUrl} alt={`${idx + 1}`}
+                    {thumbUrl && !hasError ? (
+                      <img 
+                        src={thumbUrl} 
+                        alt={`${idx + 1}`}
                         loading="lazy"
+                        onError={() => {
+                          setImageErrors(prev => ({ ...prev, [slide.filename]: true }));
+                          if (isVideo) {
+                            const fallbackUrl = `http://${getServerIp()}:20778/thumbnails/${slide.filename}`;
+                            setThumbnailUrls(prev => ({
+                              ...prev,
+                              [slide.filename]: fallbackUrl
+                            }));
+                            setTimeout(() => {
+                              setImageErrors(prev => ({ ...prev, [slide.filename]: false }));
+                            }, 1000);
+                          }
+                        }}
                         style={{ 
                           width: '100%', height: '100%', 
                           objectFit: 'contain', padding: '6px',
                           filter: isActive ? 'brightness(1.05)' : 'brightness(0.85)'
-                        }} />
+                        }} 
+                      />
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', opacity: 0.5 }}>
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5">
-                          <rect x="3" y="3" width="18" height="18" rx="2" />
-                          <circle cx="8.5" cy="8.5" r="1.5" />
-                          <path d="M21 15l-5-5L5 21" />
+                        {isVideo ? (
+                          <>
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5">
+                              <rect x="2" y="2" width="20" height="20" rx="2" />
+                              <polygon points="10,6 18,12 10,18" fill="rgba(255,255,255,0.1)" />
+                            </svg>
+                            <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)' }}>🎬 {idx + 1}</span>
+                          </>
+                        ) : (
+                          <>
+                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5">
+                              <rect x="3" y="3" width="18" height="18" rx="2" />
+                              <circle cx="8.5" cy="8.5" r="1.5" />
+                              <path d="M21 15l-5-5L5 21" />
+                            </svg>
+                            <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)' }}>{idx + 1}</span>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    
+                    {isVideo && (
+                      <div style={{
+                        position: 'absolute',
+                        top: '8px',
+                        left: '8px',
+                        padding: '0.2rem 0.6rem',
+                        background: 'rgba(102,126,234,0.25)',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(102,126,234,0.3)',
+                        fontSize: '0.7rem',
+                        color: '#667eea',
+                        fontWeight: 700,
+                        letterSpacing: '0.5px',
+                        backdropFilter: 'blur(4px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                      }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                          <polygon points="5 3 19 12 5 21 5 3"/>
                         </svg>
-                        <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)' }}>{idx + 1}</span>
+                        <span>VÍDEO</span>
+                      </div>
+                    )}
+                    
+                    {isVideo && slide.duration && (
+                      <div style={{
+                        position: 'absolute',
+                        bottom: '8px',
+                        right: '8px',
+                        padding: '0.15rem 0.5rem',
+                        background: 'rgba(0,0,0,0.75)',
+                        borderRadius: '4px',
+                        fontSize: '0.7rem',
+                        color: '#fff',
+                        fontFamily: 'monospace',
+                        backdropFilter: 'blur(4px)',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                      }}>
+                        {formatDuration(slide.duration)}
                       </div>
                     )}
                     
@@ -698,11 +913,16 @@ function ControlPage() {
                           border: '2px solid rgba(239,68,68,0.5)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center'
                         }}>
-                          <div style={{ width: '16px', height: '16px', borderRadius: '3px', background: 'rgba(239,68,68,0.9)' }} />
+                          {/* 🔥 CORREÇÃO: Para vídeos, mostrar ícone de QUADRADO (encerrar) */}
+                          {isVideo ? (
+                            <div style={{ width: '16px', height: '16px', borderRadius: '2px', background: 'rgba(239,68,68,0.9)' }} />
+                          ) : (
+                            <div style={{ width: '16px', height: '16px', borderRadius: '3px', background: 'rgba(239,68,68,0.9)' }} />
+                          )}
                         </div>
                         <div style={{ textAlign: 'center' }}>
                           <span style={{ fontSize: '0.8rem', fontWeight: 700, letterSpacing: '1px', color: 'rgba(239,68,68,0.9)', textTransform: 'uppercase', lineHeight: '1.3' }}>
-                            Toque para<br />encerrar
+                            Toque para encerrar
                           </span>
                         </div>
                       </div>
@@ -715,9 +935,13 @@ function ControlPage() {
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0
                   }}>
                     <span style={{ fontSize: '0.75rem', fontWeight: 600, color: isActive ? 'rgba(239,68,68,0.9)' : 'rgba(255,255,255,0.5)', letterSpacing: '0.5px' }}>
-                      {idx + 1}
+                      {isVideo ? '▶ ' : ''}{idx + 1}
                     </span>
-                    {isActive && <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#ef4444', boxShadow: '0 0 8px rgba(239,68,68,0.6)' }} />}
+                    {isActive && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#ef4444', boxShadow: '0 0 8px rgba(239,68,68,0.6)' }} />
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -749,7 +973,7 @@ function ControlPage() {
         )}
       </div>
 
-      {/* ===== NOTIFICAÇÕES DE MÃOS LEVANTADAS - TAMANHO DINÂMICO ===== */}
+      {/* Notificações de mãos levantadas */}
       {notifications.length > 0 && (
         <div
           ref={notificationsRef}
@@ -762,7 +986,7 @@ function ControlPage() {
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            justifyContent: 'center', // 🔥 Centralizado verticalmente
+            justifyContent: 'center',
             gap: `${size.gap}rem`,
             zIndex: 1000,
             padding: '1.5rem',
@@ -869,7 +1093,6 @@ function ControlPage() {
             </div>
           ))}
           
-          {/* 🔥 Indicador de quantidade quando há muitas notificações */}
           {notifications.length > 5 && (
             <div style={{
               color: 'rgba(255,255,255,0.3)',
@@ -942,7 +1165,6 @@ function ControlPage() {
               </p>
             </div>
             
-            {/* Opções de resposta */}
             {operatorMessage.response_options && operatorMessage.response_options.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '0.5rem' }}>
                 {operatorMessage.response_options.map((option: string, idx: number) => (
@@ -986,7 +1208,6 @@ function ControlPage() {
               </div>
             )}
             
-            {/* Botão OK padrão */}
             {(!operatorMessage.response_options || operatorMessage.response_options.length === 0) && (
               <button onClick={() => {
                 const ws = wsRef.current;
