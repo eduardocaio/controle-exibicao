@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X, Pause, Play } from 'lucide-react';
+import { GlassWater, UserPlus, Check, AlertCircle, MessageSquare, Clock, X, Pause, Play, MessageCircle } from 'lucide-react';
 
 function ControlPage() {
   const [slides, setSlides] = useState<any[]>([]);
@@ -359,7 +359,7 @@ function ControlPage() {
         iconSize: 56, 
         gap: 1, 
         maxWidth: 520,
-        labelSize: 0.7,
+        labelSize: 1,
         timeSize: 0.6
       };
     } else if (count <= 5) {
@@ -369,7 +369,7 @@ function ControlPage() {
         iconSize: 44, 
         gap: 0.7, 
         maxWidth: 460,
-        labelSize: 0.55,
+        labelSize: 0.7,
         timeSize: 0.45
       };
     } else if (count <= 7) {
@@ -1034,14 +1034,14 @@ function ControlPage() {
                 flexShrink: 0,
                 animation: 'pulse 2s infinite',
               }}>
-                <UserPlus size={Math.max(16, size.iconSize * 0.5)} color="#fff" />
+                <MessageCircle size={Math.max(16, size.iconSize * 0.5)} color="#fff" />
               </div>
               
               <div style={{ flex: 1, textAlign: 'center', minWidth: 0 }}>
                 <div style={{ 
                   fontSize: `${Math.max(0.3, size.labelSize)}rem`, 
-                  fontWeight: 600, 
-                  color: 'rgba(255,255,255,0.8)',
+                  fontWeight: 700, 
+                  color: 'rgb(255, 255, 255)',
                   textTransform: 'uppercase',
                   letterSpacing: '1px',
                 }}>
