@@ -867,22 +867,23 @@ function ControlPage() {
                     {isVideo && (
                       <div style={{
                         position: 'absolute',
-                        top: '8px',
-                        left: '8px',
-                        padding: '0.2rem 0.6rem',
-                        background: 'rgba(102,126,234,0.25)',
-                        borderRadius: '6px',
-                        border: '1px solid rgba(102,126,234,0.3)',
-                        fontSize: '0.7rem',
+                        top: '16px',
+                        left: '16px',
+                        padding: '0.5rem 1.0rem',
+                        background: 'rgba(102,126,234,0.3)',
+                        borderRadius: '10px',
+                        border: '2.5px solid rgba(102,126,234,0.5)',
+                        fontSize: '1.5rem',
                         color: '#667eea',
-                        fontWeight: 700,
-                        letterSpacing: '0.5px',
-                        backdropFilter: 'blur(4px)',
+                        fontWeight: 800,
+                        letterSpacing: '1.5px',
+                        backdropFilter: 'blur(8px)',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '0.3rem',
+                        gap: '0.7rem',
+                        boxShadow: '0 4px 16px rgba(102,126,234,0.25)',
                       }}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                           <polygon points="5 3 19 12 5 21 5 3"/>
                         </svg>
                         <span>VÍDEO</span>
@@ -894,10 +895,10 @@ function ControlPage() {
                         position: 'absolute',
                         bottom: '8px',
                         right: '8px',
-                        padding: '0.15rem 0.5rem',
+                        padding: '0.5rem 1.5rem',
                         background: 'rgba(0,0,0,0.75)',
                         borderRadius: '4px',
-                        fontSize: '0.7rem',
+                        fontSize: '1.5rem',
                         color: '#fff',
                         fontFamily: 'monospace',
                         backdropFilter: 'blur(4px)',

@@ -317,7 +317,7 @@ function DisplayPage() {
               fontSize: 'clamp(3rem, 3.5vw, 4.5rem)',
               color: 'rgba(255,255,255,0.85)',
               fontWeight: 600,
-              letterSpacing: '5px',
+              letterSpacing: '4px',
               textTransform: 'uppercase',
               textAlign: 'center',
               textShadow: '0 2px 20px rgba(0,0,0,0.3)'
@@ -327,9 +327,9 @@ function DisplayPage() {
 
             <div style={{
               fontSize: 'clamp(10rem, 22vw, 20rem)',
-              fontWeight: 800,
+              fontWeight: 700,
               color: '#ffffff',
-              letterSpacing: '6px',
+              letterSpacing: '1px',
               fontVariantNumeric: 'tabular-nums',
               lineHeight: 1,
               fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -340,9 +340,9 @@ function DisplayPage() {
 
             {countdownTarget && (
               <div style={{
-                fontSize: 'clamp(2rem, 2.5vw, 3.5rem)',
-                color: 'rgba(255,255,255,0.6)',
-                fontWeight: 500,
+                fontSize: 'clamp(2rem, 3vw, 3.5rem)',
+                color: 'rgba(255,255,255,0.85)',
+                fontWeight: 700,
                 letterSpacing: '3px',
                 display: 'flex',
                 alignItems: 'center',
@@ -353,7 +353,7 @@ function DisplayPage() {
                   width: '12px', 
                   height: '12px',
                   borderRadius: '50%',
-                  backgroundColor: 'rgba(74,144,217,0.6)',
+                  backgroundColor: 'rgba(74, 109, 167, 0.6)',
                   display: 'inline-block',
                   boxShadow: '0 0 20px rgba(74,144,217,0.4)'
                 }} />
