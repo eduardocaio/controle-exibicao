@@ -25,7 +25,9 @@
     "targets": ["nsis"],
     "resources": {
       "resources/texto-do-ano.jpg": "resources/texto-do-ano.jpg",
-      "resources/zoom_bot.exe": "resources/zoom_bot.exe"
+      "resources/zoom_bot.exe": "resources/zoom_bot.exe",
+      "../ffmpeg/ffmpeg.exe": "resources/ffmpeg.exe",
+      "../ffmpeg/ffprobe.exe": "resources/ffprobe.exe"
     },
     "icon": [
       "icons/32x32.png",

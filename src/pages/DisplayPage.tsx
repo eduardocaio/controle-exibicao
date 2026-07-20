@@ -107,8 +107,7 @@ function DisplayPage() {
           const isVideo = /\.(mp4|webm|mov|avi|mkv|m4v|ogv|wmv|flv|3gp)$/i.test(filename);
           
           if (isVideo) {
-            const ip = window.location.hostname;
-            const videoUrl = `http://${ip}:20778/videos/${filename}`;
+            const videoUrl = `http://localhost:20778/videos/${filename}`;
             setVideoSrc(videoUrl);
             setMediaType('video');
             setImageSrc('');

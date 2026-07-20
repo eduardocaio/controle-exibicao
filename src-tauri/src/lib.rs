@@ -414,7 +414,29 @@ fn copy_media_fallback(dir: &PathBuf, result: &mut Vec<PathBuf>) {
 
 // 🔥 NOVA FUNÇÃO: Obter duração do vídeo usando ffprobe
 fn get_video_duration(video_path: &PathBuf) -> Option<f64> {
+    // Tentar usar o ffprobe do sistema primeiro
     let output = std::process::Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .ok()?;
+    
+    if output.status.success() {
+        let duration_str = String::from_utf8_lossy(&output.stdout);
+        if let Ok(dur) = duration_str.trim().parse::<f64>() {
+            return Some(dur);
+        }
+    }
+    
+    None
+}
+
+fn get_video_duration_with_ffprobe(video_path: &PathBuf, ffprobe_path: &PathBuf) -> Option<f64> {
+    let output = std::process::Command::new(ffprobe_path)
         .args(&[
             "-v", "error",
             "-show_entries", "format=duration",
@@ -463,10 +485,9 @@ fn create_placeholder_thumbnail(thumb_path: &PathBuf) {
 fn create_video_thumbnail(video_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
     let thumb_path_jpg = thumb_path.with_extension("jpg");
     
-    // Obtém duração do vídeo
+    // Primeiro, tentar criar thumbnail com ffmpeg do sistema
     let duration = get_video_duration(video_path);
     
-    // Pega o frame do meio do vídeo ou fallback para 10s
     let seek_time = if let Some(dur) = duration {
         let mid = dur / 2.0;
         format!("{:.2}", mid)
@@ -474,22 +495,89 @@ fn create_video_thumbnail(video_path: &PathBuf, thumb_path: &PathBuf) -> Result<
         "00:00:10.000".to_string()
     };
     
-    // Usa ffmpeg com -update 1 para salvar imagem única
+    // Tentar com ffmpeg do sistema primeiro
+    let mut success = false;
     let status = std::process::Command::new("ffmpeg")
         .args(&[
             "-i", video_path.to_str().unwrap_or(""),
             "-ss", &seek_time,
             "-vframes", "1",
             "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
-            "-update", "1",  // 🔥 IMPORTANTE
+            "-update", "1",
+            thumb_path_jpg.to_str().unwrap_or(""),
+            "-y"
+        ])
+        .status();
+    
+    if status.is_ok() && thumb_path_jpg.exists() {
+        success = true;
+    }
+    
+    // Se falhou, tentar com ffmpeg embutido (se disponível)
+    if !success {
+        if let Ok(app_handle) = std::env::var("TAURI_APP_HANDLE") {
+            // Nota: Em runtime, precisamos passar o app_handle
+            // Por enquanto, vamos criar uma versão que tenta usar o embutido
+            println!("⚠️ Thumbnail com ffmpeg do sistema falhou, tentando embutido...");
+        }
+    }
+    
+    // Se ainda falhou, criar placeholder
+    if !thumb_path_jpg.exists() {
+        create_placeholder_thumbnail(&thumb_path_jpg);
+    }
+    
+    Ok(())
+}
+
+fn create_video_thumbnail_with_ffmpeg(
+    video_path: &PathBuf, 
+    thumb_path: &PathBuf,
+    app_handle: &tauri::AppHandle
+) -> Result<(), String> {
+    let thumb_path_jpg = thumb_path.with_extension("jpg");
+    
+    // Garantir que ffmpeg está disponível no diretório de dados
+    let _ = ensure_ffmpeg_in_data_dir(app_handle);
+    
+    // Obter caminhos do ffmpeg
+    let ffmpeg = get_ffmpeg_path(app_handle);
+    let ffprobe = get_ffprobe_path(app_handle);
+    
+    println!("🔍 Usando ffmpeg: {:?}", ffmpeg);
+    println!("🔍 Usando ffprobe: {:?}", ffprobe);
+    
+    // Obter duração com ffprobe embutido
+    let duration = get_video_duration_with_ffprobe(video_path, &ffprobe);
+    
+    let seek_time = if let Some(dur) = duration {
+        let mid = dur / 2.0;
+        format!("{:.2}", mid)
+    } else {
+        "00:00:10.000".to_string()
+    };
+    
+    println!("🎬 Extraindo thumbnail do vídeo: {:?}", video_path);
+    println!("⏱️ Seek time: {}", seek_time);
+    
+    // Usar ffmpeg embutido
+    let status = std::process::Command::new(&ffmpeg)
+        .args(&[
+            "-i", video_path.to_str().unwrap_or(""),
+            "-ss", &seek_time,
+            "-vframes", "1",
+            "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
+            "-update", "1",
             thumb_path_jpg.to_str().unwrap_or(""),
             "-y"
         ])
         .status();
     
     if status.is_err() || !thumb_path_jpg.exists() {
-        // Fallback: criar imagem placeholder
+        println!("⚠️ Falha ao gerar thumbnail com ffmpeg embutido, criando placeholder");
         create_placeholder_thumbnail(&thumb_path_jpg);
+    } else {
+        println!("✅ Thumbnail gerada com sucesso: {:?}", thumb_path_jpg);
     }
     
     Ok(())
@@ -649,44 +737,19 @@ async fn upload_images_to_presentation(
             let dest_path = videos_dir.join(&new_filename);
             let _ = fs::copy(&original_path, &dest_path);
             
-            // OBTÉM A DURAÇÃO DO VÍDEO
             let video_duration = get_video_duration(&original_path);
-            
             let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
-            let duration = get_video_duration(&original_path);
             
-            let seek_time = if let Some(dur) = duration {
-                let mid = dur / 2.0;
-                format!("{:.2}", mid)
-            } else {
-                "00:00:10.000".to_string()
-            };
+            // 🔥 USAR A NOVA FUNÇÃO
+            create_video_thumbnail_with_ffmpeg(&original_path, &thumb_path, &app_handle)?;
             
-            let status = std::process::Command::new("ffmpeg")
-                .args(&[
-                    "-i", original_path.to_str().unwrap_or(""),
-                    "-ss", &seek_time,
-                    "-vframes", "1",
-                    "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
-                    "-update", "1",
-                    thumb_path.to_str().unwrap_or(""),
-                    "-y"
-                ])
-                .status();
-            
-            if status.is_err() || !thumb_path.exists() {
-                create_placeholder_thumbnail(&thumb_path);
-            }
-            
-            // 🔥 CORREÇÃO: Criar o Slide diretamente com duração
             new_slides.push(Slide {
                 id: uuid::Uuid::new_v4().to_string(),
                 filename: new_filename.clone(),
-                order: 0, // Será ajustado depois
+                order: 0,
                 is_video: true,
                 duration: video_duration,
             });
-            
         } else {
             // Processar imagem normalmente
             let dest_path = images_dir.join(&new_filename);
@@ -2169,7 +2232,7 @@ fn start_upload_server(
 
         let upload_api = warp::path!("api" / "upload" / String)
             .and(warp::post())
-            .and(warp::multipart::form().max_length(500 * 1024 * 1024)) // 🔥 500MB para vídeos
+            .and(warp::multipart::form().max_length(500 * 1024 * 1024))
             .and(state)
             .and_then(move |token: String, mut form: warp::multipart::FormData, (state, handle, sessions, clients): (SharedState, tauri::AppHandle, Arc<UploadSessions>, Arc<WsClients>)| async move {
                 let session_name = {
@@ -2192,10 +2255,9 @@ fn start_upload_server(
                 fs::create_dir_all(&temp_dir).ok();
 
                 let mut new_slides: Vec<Slide> = Vec::new();
-                let mut playlist_slides = Vec::new(); // Slides da JWLplaylist
-                let mut media_slides = Vec::new(); // Slides de imagens/vídeos
+                let mut playlist_slides = Vec::new();
+                let mut media_slides = Vec::new();
 
-                // 🔥 PRIMEIRO: Processar todos os arquivos
                 while let Some(Ok(part)) = form.next().await {
                     let filename = part.filename().unwrap_or("arquivo").to_string();
                     let ext = PathBuf::from(&filename)
@@ -2220,14 +2282,11 @@ fn start_upload_server(
                         continue;
                     }
                     
-                    // 🔥 VERIFICAR SE É PLAYLIST JW
                     let is_jw_playlist = filename.ends_with(".jwlplaylist") || filename.ends_with(".zip");
                     
                     if is_jw_playlist {
-                        // 🔥 PROCESSAR PLAYLIST JW
                         let temp_file = temp_dir.join(&filename);
                         if let Ok(_) = fs::write(&temp_file, &data) {
-                            // Extrair a playlist
                             match extract_jw_playlist_from_data(&temp_file, &handle).await {
                                 Ok(slides) => {
                                     playlist_slides.extend(slides);
@@ -2239,44 +2298,26 @@ fn start_upload_server(
                             let _ = fs::remove_file(&temp_file);
                         }
                     } else {
-                        // 🔥 PROCESSAR MÍDIA NORMAL
                         let is_video = is_video_ext(&ext);
                         let is_image = is_image_ext(&ext);
-                        
+
                         if !is_video && !is_image {
                             continue;
                         }
-                        
+
                         let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-                        
+
                         if is_video {
                             let dest_path = videos_dir.join(&new_filename);
                             let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
                             
                             if let Ok(_) = fs::write(&dest_path, &data) {
-                                // Gerar thumbnail
                                 let video_duration = get_video_duration(&dest_path);
-                                let seek_time = if let Some(dur) = video_duration {
-                                    let mid = dur / 2.0;
-                                    format!("{:.2}", mid)
-                                } else {
-                                    "00:00:10.000".to_string()
-                                };
                                 
-                                let status = std::process::Command::new("ffmpeg")
-                                    .args(&[
-                                        "-i", dest_path.to_str().unwrap_or(""),
-                                        "-ss", &seek_time,
-                                        "-vframes", "1",
-                                        "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
-                                        "-update", "1",
-                                        thumb_path.to_str().unwrap_or(""),
-                                        "-y"
-                                    ])
-                                    .status();
-                                
-                                if status.is_err() || !thumb_path.exists() {
-                                    create_placeholder_thumbnail(&thumb_path);
+                                // 🔥 USAR A NOVA FUNÇÃO - com tratamento de erro
+                                if let Err(e) = create_video_thumbnail_with_ffmpeg(&dest_path, &thumb_path, &handle) {
+                                    eprintln!("⚠️ Erro ao gerar thumbnail: {}", e);
+                                    // Continua mesmo com erro, o placeholder será usado
                                 }
                                 
                                 media_slides.push(Slide {
@@ -2327,12 +2368,10 @@ fn start_upload_server(
                     }
                 }
 
-                // 🔥 COMBINAR: Playlist primeiro, depois mídia
                 let mut all_slides = Vec::new();
                 all_slides.extend(playlist_slides);
                 all_slides.extend(media_slides);
                 
-                // Reordenar
                 for (i, slide) in all_slides.iter_mut().enumerate() {
                     slide.order = i;
                 }
@@ -2352,7 +2391,6 @@ fn start_upload_server(
                     handle.emit("tablet-upload-complete", &pres_id).ok();
                 }
 
-                // Limpar temp
                 let _ = fs::remove_dir_all(&temp_dir);
 
                 Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({"success": true})))
@@ -2490,35 +2528,14 @@ async fn extract_jw_playlist_internal(file_path: &PathBuf, app_handle: &tauri::A
                         let new_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
                         
                         if is_video {
-                            // Processar vídeo
                             let dest_path = videos_dir.join(&new_filename);
                             let thumb_path = thumbs_dir.join(&new_filename).with_extension("jpg");
                             
                             let _ = fs::copy(&src_path, &dest_path);
-                            
                             let video_duration = get_video_duration(&src_path);
-                            let seek_time = if let Some(dur) = video_duration {
-                                let mid = dur / 2.0;
-                                format!("{:.2}", mid)
-                            } else {
-                                "00:00:10.000".to_string()
-                            };
                             
-                            let status = std::process::Command::new("ffmpeg")
-                                .args(&[
-                                    "-i", src_path.to_str().unwrap_or(""),
-                                    "-ss", &seek_time,
-                                    "-vframes", "1",
-                                    "-vf", "scale=400:300:force_original_aspect_ratio=decrease",
-                                    "-update", "1",
-                                    thumb_path.to_str().unwrap_or(""),
-                                    "-y"
-                                ])
-                                .status();
-                            
-                            if status.is_err() || !thumb_path.exists() {
-                                create_placeholder_thumbnail(&thumb_path);
-                            }
+                            // 🔥 USAR A NOVA FUNÇÃO
+                            create_video_thumbnail_with_ffmpeg(&src_path, &thumb_path, app_handle)?;
                             
                             new_slides.push(Slide {
                                 id: uuid::Uuid::new_v4().to_string(),
@@ -2527,7 +2544,6 @@ async fn extract_jw_playlist_internal(file_path: &PathBuf, app_handle: &tauri::A
                                 is_video: true,
                                 duration: video_duration,
                             });
-                            
                         } else {
                             // Processar imagem
                             let dest_path = images_dir.join(&new_filename);
@@ -3135,6 +3151,206 @@ async fn video_finished(
         "type": "video_finished",
     }).to_string();
     ws_clients.broadcast(ws_msg);
+    
+    Ok(())
+}
+
+// 🔥 FUNÇÕES PARA ENCONTRAR FFMPEG E FFPROBE
+fn get_ffmpeg_path(app_handle: &tauri::AppHandle) -> PathBuf {
+    // 1. Tentar no diretório de dados do app (onde copiamos durante a instalação)
+    let data_dir = get_data_dir(app_handle);
+    let ffmpeg_path = data_dir.join("resources").join("ffmpeg.exe");
+    if ffmpeg_path.exists() {
+        println!("✅ ffmpeg encontrado em: {:?}", ffmpeg_path);
+        return ffmpeg_path;
+    }
+    
+    // 2. Tentar no diretório do executável (para desenvolvimento)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // Verificar no diretório do executável
+            let ffmpeg_in_exe = exe_dir.join("ffmpeg.exe");
+            if ffmpeg_in_exe.exists() {
+                println!("✅ ffmpeg encontrado em: {:?}", ffmpeg_in_exe);
+                return ffmpeg_in_exe;
+            }
+            
+            // Verificar em src-tauri/resources (desenvolvimento)
+            let ffmpeg_in_resources = exe_dir.join("resources").join("ffmpeg.exe");
+            if ffmpeg_in_resources.exists() {
+                println!("✅ ffmpeg encontrado em: {:?}", ffmpeg_in_resources);
+                return ffmpeg_in_resources;
+            }
+            
+            // Verificar em src-tauri (desenvolvimento)
+            let ffmpeg_in_src = exe_dir.join("..").join("src-tauri").join("resources").join("ffmpeg.exe");
+            if ffmpeg_in_src.exists() {
+                println!("✅ ffmpeg encontrado em: {:?}", ffmpeg_in_src);
+                return ffmpeg_in_src;
+            }
+        }
+    }
+    
+    // 3. Tentar no sistema (PATH)
+    if let Ok(output) = std::process::Command::new("where").arg("ffmpeg").output() {
+        if output.status.success() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Some(first_path) = s.lines().next() {
+                    let path = PathBuf::from(first_path.trim());
+                    if path.exists() {
+                        println!("✅ ffmpeg encontrado no PATH: {:?}", path);
+                        return path;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 4. Fallback: assumir que está no PATH (pode falhar, mas tentamos)
+    println!("⚠️ Usando ffmpeg do PATH (pode não funcionar)");
+    PathBuf::from("ffmpeg")
+}
+
+fn get_ffprobe_path(app_handle: &tauri::AppHandle) -> PathBuf {
+    // 1. Tentar no diretório de dados do app
+    let data_dir = get_data_dir(app_handle);
+    let ffprobe_path = data_dir.join("resources").join("ffprobe.exe");
+    if ffprobe_path.exists() {
+        println!("✅ ffprobe encontrado em: {:?}", ffprobe_path);
+        return ffprobe_path;
+    }
+    
+    // 2. Tentar no diretório do executável
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let ffprobe_in_exe = exe_dir.join("ffprobe.exe");
+            if ffprobe_in_exe.exists() {
+                println!("✅ ffprobe encontrado em: {:?}", ffprobe_in_exe);
+                return ffprobe_in_exe;
+            }
+            
+            let ffprobe_in_resources = exe_dir.join("resources").join("ffprobe.exe");
+            if ffprobe_in_resources.exists() {
+                println!("✅ ffprobe encontrado em: {:?}", ffprobe_in_resources);
+                return ffprobe_in_resources;
+            }
+            
+            let ffprobe_in_src = exe_dir.join("..").join("src-tauri").join("resources").join("ffprobe.exe");
+            if ffprobe_in_src.exists() {
+                println!("✅ ffprobe encontrado em: {:?}", ffprobe_in_src);
+                return ffprobe_in_src;
+            }
+        }
+    }
+    
+    // 3. Tentar no sistema
+    if let Ok(output) = std::process::Command::new("where").arg("ffprobe").output() {
+        if output.status.success() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Some(first_path) = s.lines().next() {
+                    let path = PathBuf::from(first_path.trim());
+                    if path.exists() {
+                        println!("✅ ffprobe encontrado no PATH: {:?}", path);
+                        return path;
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("⚠️ Usando ffprobe do PATH (pode não funcionar)");
+    PathBuf::from("ffprobe")
+}
+
+// 🔥 FUNÇÃO PARA COPIAR FFMPEG PARA O DIRETÓRIO DE DADOS
+fn ensure_ffmpeg_in_data_dir(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let data_dir = get_data_dir(app_handle);
+    let resources_dir = data_dir.join("resources");
+    fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
+    
+    let dest_ffmpeg = resources_dir.join("ffmpeg.exe");
+    let dest_ffprobe = resources_dir.join("ffprobe.exe");
+    
+    // Se já existe, não precisa copiar
+    if dest_ffmpeg.exists() && dest_ffprobe.exists() {
+        return Ok(());
+    }
+    
+    // Procurar ffmpeg no diretório do executável
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // Verificar se ffmpeg está no diretório do executável
+            let src_ffmpeg = exe_dir.join("ffmpeg.exe");
+            let src_ffprobe = exe_dir.join("ffprobe.exe");
+            
+            if src_ffmpeg.exists() {
+                println!("📁 Copiando ffmpeg de {:?} para {:?}", src_ffmpeg, dest_ffmpeg);
+                fs::copy(&src_ffmpeg, &dest_ffmpeg).map_err(|e| e.to_string())?;
+            }
+            
+            if src_ffprobe.exists() {
+                println!("📁 Copiando ffprobe de {:?} para {:?}", src_ffprobe, dest_ffprobe);
+                fs::copy(&src_ffprobe, &dest_ffprobe).map_err(|e| e.to_string())?;
+            }
+            
+            // Verificar no diretório resources do executável
+            let src_resources = exe_dir.join("resources");
+            if src_resources.exists() {
+                let src_ffmpeg_res = src_resources.join("ffmpeg.exe");
+                let src_ffprobe_res = src_resources.join("ffprobe.exe");
+                
+                if src_ffmpeg_res.exists() && !dest_ffmpeg.exists() {
+                    println!("📁 Copiando ffmpeg de {:?}", src_ffmpeg_res);
+                    fs::copy(&src_ffmpeg_res, &dest_ffmpeg).map_err(|e| e.to_string())?;
+                }
+                
+                if src_ffprobe_res.exists() && !dest_ffprobe.exists() {
+                    println!("📁 Copiando ffprobe de {:?}", src_ffprobe_res);
+                    fs::copy(&src_ffprobe_res, &dest_ffprobe).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    
+    // Se ainda não encontrou, tentar no PATH
+    if !dest_ffmpeg.exists() {
+        if let Ok(output) = std::process::Command::new("where").arg("ffmpeg").output() {
+            if output.status.success() {
+                if let Ok(s) = String::from_utf8(output.stdout) {
+                    if let Some(first_path) = s.lines().next() {
+                        let src = PathBuf::from(first_path.trim());
+                        if src.exists() {
+                            println!("📁 Copiando ffmpeg do sistema: {:?}", src);
+                            fs::copy(&src, &dest_ffmpeg).map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if !dest_ffprobe.exists() {
+        if let Ok(output) = std::process::Command::new("where").arg("ffprobe").output() {
+            if output.status.success() {
+                if let Ok(s) = String::from_utf8(output.stdout) {
+                    if let Some(first_path) = s.lines().next() {
+                        let src = PathBuf::from(first_path.trim());
+                        if src.exists() {
+                            println!("📁 Copiando ffprobe do sistema: {:?}", src);
+                            fs::copy(&src, &dest_ffprobe).map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Verificar se copiou com sucesso
+    if dest_ffmpeg.exists() && dest_ffprobe.exists() {
+        println!("✅ ffmpeg e ffprobe copiados com sucesso para o diretório de dados");
+    } else {
+        println!("⚠️ Não foi possível copiar ffmpeg/ffprobe. Usando versão do sistema.");
+    }
     
     Ok(())
 }
