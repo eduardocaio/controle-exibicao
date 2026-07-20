@@ -24,3 +24,7 @@ dist-ssr
 *.sw?
 src-tauri/resources/zoom_bot.exe
 src-tauri/resources/zoom_bot_backup.exe
+src-tauri/resources/ffmpeg.exe
+src-tauri/resources/ffprobe.exe
+ffmpeg
+
