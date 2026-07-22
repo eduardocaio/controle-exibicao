@@ -2781,7 +2781,7 @@ async fn zoom_start_bot(
         println!("✅ zoom_bot.exe encontrado em: {:?}", zoom_bot_exe);
     }
     
-    let use_visible = false;
+    let use_visible = true;
     
     let mut cmd = tokio::process::Command::new(&zoom_bot_exe);
     cmd.arg("--meeting").arg(&config.meeting_id);

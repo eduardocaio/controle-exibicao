@@ -14,7 +14,7 @@ os.dup2(sys.stdout.fileno(), sys.stderr.fileno())
 
 # Variável global para controlar o loop de monitoramento
 monitoramento_ativo = True
-funcoes_registradas = False  # 🔥 Flag para controlar o registro das funções
+funcoes_registradas = False
 
 async def verificar_conexao(page):
     """Verifica se o bot ainda está na reunião verificando o botão Participants"""
@@ -91,26 +91,9 @@ async def abrir_painel_participantes(page):
         print(f"[Bot] Erro ao abrir painel: {e}")
         return False
 
-async def mutar_audio_e_video(page):
-    """Muta o microfone e desliga a câmera antes de entrar na reunião"""
+async def mutar_microfone(page):
+    """Apenas muta o microfone (câmera já vem fechada)"""
     try:
-        # 🔥 Desligar a câmera
-        print("[Bot] Desligando câmera...")
-        try:
-            video_btn = page.locator("#preview-video-control-button")
-            if await video_btn.is_visible(timeout=2000):
-                await video_btn.click()
-                print("[Bot] ✅ Câmera desligada!")
-            else:
-                video_btn = page.locator('button[aria-label*="camera" i], button[aria-label*="câmera" i], button[aria-label*="video" i]').first
-                if await video_btn.is_visible(timeout=2000):
-                    await video_btn.click()
-                    print("[Bot] ✅ Câmera desligada!")
-                else:
-                    print("[Bot] ⚠️ Botão da câmera não encontrado")
-        except Exception as e:
-            print(f"[Bot] ⚠️ Erro ao desligar câmera: {e}")
-        
         # 🔥 Mutar o microfone
         print("[Bot] Mutando microfone...")
         try:
@@ -129,7 +112,7 @@ async def mutar_audio_e_video(page):
             print(f"[Bot] ⚠️ Erro ao mutar microfone: {e}")
             
     except Exception as e:
-        print(f"[Bot] ⚠️ Erro ao mutar áudio/vídeo: {e}")
+        print(f"[Bot] ⚠️ Erro ao mutar microfone: {e}")
 
 async def fazer_login(page, meeting_id, passcode, nome):
     try:
@@ -229,8 +212,8 @@ async def fazer_login(page, meeting_id, passcode, nome):
         
         await asyncio.sleep(0.5)
         
-        # 🔥 MUTAR ÁUDIO E VÍDEO ANTES DE CLICAR NO JOIN
-        await mutar_audio_e_video(page)
+        # 🔥 MUTAR APENAS O MICROFONE (CÂMERA JÁ VEM FECHADA)
+        await mutar_microfone(page)
         
         # Clicar Join
         print("[Bot] Procurando botao 'Join'...")
@@ -472,8 +455,12 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
     print()
     
     async with async_playwright() as p:
+        # 🔥 SE HEADLESS NÃO FUNCIONAR, USA VISIBLE COM JANELA MINIMIZADA
+        # Força visible para Windows (mais estável)
+        use_visible = True  # 🔥 SEMPRE USAR VISÍVEL PARA GARANTIR FUNCIONAMENTO
+        
         launch_args = {
-            "headless": headless,
+            "headless": False,  # 🔥 NUNCA USAR HEADLESS NO WINDOWS
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--use-fake-ui-for-media-stream",
@@ -487,39 +474,42 @@ async def monitorar_zoom(meeting_id, passcode, nome, headless=True):
                 "--disable-background-networking",
                 "--disable-sync",
                 "--disable-translate",
-                "--window-size=1280,720",
+                "--window-size=1,1",  # 🔥 JANELA MINÚSCULA (1x1 pixels)
+                "--window-position=-10000,-10000",  # 🔥 FORA DA TELA
                 "--disable-notifications",
                 "--mute-audio",
+                # 🔥 ARGUMENTOS PARA MINIMIZAR USO DE RECURSOS
+                "--disable-accelerated-2d-canvas",
+                "--disable-accelerated-video-decode",
+                "--disable-gpu-compositing",
+                "--disable-software-rasterizer",
             ]
         }
         
-        if headless:
-            launch_args["args"].append("--headless=new")
+        print("[Bot] 🔧 Usando modo visível com janela minimizada (mais confiável)")
         
-        print("[Bot] Lancando navegador...")
         browser = await p.chromium.launch(**launch_args)
-        print("[Bot] Navegador iniciado")
+        print("[Bot] Navegador iniciado (janela invisível)")
         
+        # 🔥 CONTEXT COM USER-AGENT ESTÁVEL
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale='pt-BR',
             timezone_id='America/Sao_Paulo',
             permissions=['camera', 'microphone'],
         )
         
+        # 🔥 STEALTH MÍNIMO
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'headless', { get: () => false });
             window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
             Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
         """)
         
         page = await context.new_page()
-        
-        await page.route("**/*", lambda route: route.abort() 
-                        if route.request.resource_type in ['media', 'font']
-                        else route.continue_())
         
         print(f"[Bot] Conectando a reuniao {meeting_id}...")
         
@@ -633,10 +623,12 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    headless = not args.visible
+    # 🔥 IGNORA O PARÂMETRO HEADLESS - SEMPRE USA VISÍVEL COM JANELA OCULTA
+    # Isso garante que o bot funcione SEMPRE, independente da configuração
     
-    # Forçar codificação UTF-8 para evitar erros de caracteres
+    # Forçar codificação UTF-8
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     
-    asyncio.run(monitorar_zoom(args.meeting, args.passcode, args.name, headless))
+    # 🔥 SEMPRE CHAMA COM headless=False (mas a janela fica invisível)
+    asyncio.run(monitorar_zoom(args.meeting, args.passcode, args.name, False))
